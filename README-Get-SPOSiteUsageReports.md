@@ -23,7 +23,7 @@ This PowerShell script enumerates usage reports from all SharePoint sites in a t
 - PowerShell 5.1 or later
 - Microsoft.Graph.Reports module (auto-installed if missing)
 - Microsoft.Graph.Authentication module (auto-installed if missing)
-- Reports.Read.All and Sites.Read.All permissions
+- Reports.Read.All, Sites.Read.All, and ReportSettings.ReadWrite.All permissions
 
 ### For Combined Mode
 - PowerShell 5.1 or later
@@ -214,6 +214,20 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 - Personal sites are excluded by default; modify the script if needed
 - Some sites may be hidden or require special permissions
 
+### Issue: Graph API Returns Obfuscated Data (Zeroed SiteIds, Hashed Names)
+**Solution**: The Microsoft 365 admin center has a privacy setting called **"Conceal user, group, and site names in all reports"** that causes the Graph Reports API to return hashed owner names, zeroed-out Site IDs, and empty Site URLs.
+
+The script now handles this automatically:
+1. **Detects obfuscated data** by checking for zeroed SiteIds, empty URLs, and hashed owner names
+2. **Checks the admin setting** via `GET /admin/reportSettings` and **attempts to disable it** via `PATCH /admin/reportSettings` (requires `ReportSettings.ReadWrite.All` permission)
+3. **Falls back to the Microsoft Graph Sites API** (`/sites/getAllSites`) which is not affected by the report-privacy setting, providing real site URLs, IDs, and display names
+
+**Important notes:**
+- After disabling the concealment setting, report data can take **up to 48 hours** to reflect the change
+- Per-site usage metrics (page views, file counts) are only available from the Reports API and will be empty while the data is still obfuscated
+- The Sites API fallback ensures you always get real site metadata regardless of the concealment setting
+- Grant `ReportSettings.ReadWrite.All` permission for automatic setting correction
+
 ## Permissions Required
 
 ### SharePoint Online Management Shell Method
@@ -224,10 +238,12 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 Application permissions needed:
 - Reports.Read.All
 - Sites.Read.All
+- ReportSettings.ReadWrite.All (for automatic concealment setting detection and correction)
 
 Or delegated permissions:
 - Reports.Read.All
 - Sites.Read.All
+- ReportSettings.ReadWrite.All (optional, but recommended)
 
 ## Best Practices
 
@@ -255,6 +271,11 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **1.2.0** (2026-02-12): Graph API obfuscation handling
+  - Automatic detection of obfuscated Graph report data (zeroed SiteIds, hashed names)
+  - Proactive check and correction of the admin report-privacy concealment setting
+  - Sites API fallback (`/sites/getAllSites`) for real site metadata when reports are obfuscated
+  - Improved combined mode warnings when usage metrics are unavailable
 - **1.1.0** (2026-02-12): Combined mode
   - New `-UseCombined` switch merges SPO + Graph data into one report
   - Friendly names/owners from SPO with page views/activity from Graph

@@ -98,8 +98,12 @@ function Get-UsageReportsViaGraph {
     Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Cyan
     
     try {
-        # Connect to Microsoft Graph
-        Connect-MgGraph -Scopes "Reports.Read.All", "Sites.Read.All" -NoWelcome
+        # Connect to Microsoft Graph — include ReportSettings.ReadWrite.All so the
+        # script can detect and disable the report-privacy concealment setting.
+        Connect-MgGraph -Scopes "Reports.Read.All", "Sites.Read.All", "ReportSettings.ReadWrite.All" -NoWelcome
+        
+        # Proactively check the admin concealment setting before pulling the report.
+        $privacyResult = Resolve-GraphReportPrivacy
         
         Write-Host "Retrieving SharePoint site usage data from Microsoft Graph..." -ForegroundColor Cyan
         
@@ -145,6 +149,49 @@ function Get-UsageReportsViaGraph {
         }
         
         Write-Host "Retrieved usage data for $($usageData.Count) sites." -ForegroundColor Green
+        
+        # --- Obfuscation detection and Sites API fallback ---
+        if (Test-GraphDataObfuscated -ReportData $usageData) {
+            Write-Warning "Graph report data is obfuscated — site URLs, IDs, and owner names are concealed."
+
+            if ($privacyResult.WasEnabled -ne $false) {
+                Write-Warning "The report-privacy setting may have been recently changed. Cached report data can take up to 48 hours to reflect the new setting."
+            }
+
+            # Fall back to the Sites API which is unaffected by report concealment.
+            $realSites = Get-SiteMetadataViaGraph
+
+            if ($realSites.Count -gt 0) {
+                Write-Host "Building report from Sites API metadata. Per-site usage metrics (page views, file counts) are unavailable while report data is obfuscated." -ForegroundColor Yellow
+
+                $usageData = @()
+                foreach ($realSite in $realSites) {
+                    $usageData += [PSCustomObject]@{
+                        SiteUrl                 = $realSite.webUrl
+                        SiteId                  = $realSite.id
+                        OwnerDisplayName        = $realSite.displayName
+                        OwnerPrincipalName      = ''
+                        IsDeleted               = $false
+                        LastActivityDate        = ''
+                        FileCount               = ''
+                        ActiveFileCount         = ''
+                        PageViewCount           = ''
+                        VisitedPageCount        = ''
+                        StorageUsedInBytes      = ''
+                        StorageAllocatedInBytes = ''
+                        RootWebTemplate         = ''
+                        ReportRefreshDate       = ''
+                        ReportPeriod            = ''
+                    }
+                }
+                Write-Host "Rebuilt report with $($usageData.Count) sites using real site metadata from Sites API." -ForegroundColor Green
+            }
+            else {
+                Write-Warning "Could not retrieve site metadata from Sites API. Report will contain obfuscated data."
+                Write-Warning "Ensure the 'Conceal user, group, and site names in all reports' setting is disabled and re-run after 48 hours."
+            }
+        }
+
         return $usageData
     }
     catch {
@@ -247,6 +294,100 @@ function Normalize-SiteUrl {
     return $n.ToLowerInvariant()
 }
 
+# Detect whether Graph report data has been obfuscated by the M365 privacy
+# setting "Conceal user, group, and site names in all reports".  Obfuscated
+# rows have zeroed-out SiteIds, empty/null Site URLs, and hashed owner names.
+function Test-GraphDataObfuscated {
+    param([array]$ReportData)
+    if (-not $ReportData -or $ReportData.Count -eq 0) { return $false }
+    $sampleSize = [Math]::Min(5, $ReportData.Count)
+    for ($i = 0; $i -lt $sampleSize; $i++) {
+        $entry = $ReportData[$i]
+        if ([string]::IsNullOrWhiteSpace($entry.SiteUrl) -or
+            $entry.SiteId -eq '00000000-0000-0000-0000-000000000000' -or
+            ($entry.OwnerDisplayName -match '^[A-Fa-f0-9]{32}$')) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# Check the tenant admin report-privacy setting via the Graph API and, if
+# concealment is enabled, attempt to disable it so that future reports contain
+# real identifiers.  Returns a hashtable:
+#   WasEnabled - $true/$false/$null (null = could not read the setting)
+#   Fixed      - $true if the setting is now disabled
+function Resolve-GraphReportPrivacy {
+    try {
+        $settings = Invoke-MgGraphRequest -Method GET -Uri '/v1.0/admin/reportSettings' -ErrorAction Stop
+
+        if ($settings.displayConcealedNames) {
+            Write-Warning "Report privacy setting 'Conceal user, group, and site names in all reports' is ENABLED in your tenant."
+            Write-Host "Attempting to disable the concealment setting..." -ForegroundColor Yellow
+            try {
+                $body = @{ displayConcealedNames = $false } | ConvertTo-Json
+                Invoke-MgGraphRequest -Method PATCH -Uri '/v1.0/admin/reportSettings' `
+                    -Body $body -ContentType 'application/json' -ErrorAction Stop
+                Write-Host "Concealment setting has been disabled. Note: report data may take up to 48 hours to reflect this change." -ForegroundColor Green
+                Write-Host "Re-run this script after the propagation period for fully de-obfuscated data." -ForegroundColor Yellow
+                return @{ WasEnabled = $true; Fixed = $true }
+            }
+            catch {
+                Write-Warning "Could not disable the concealment setting (requires ReportSettings.ReadWrite.All permission): $_"
+                return @{ WasEnabled = $true; Fixed = $false }
+            }
+        }
+        else {
+            Write-Host "Report concealment setting is already disabled in the admin center." -ForegroundColor Green
+            return @{ WasEnabled = $false; Fixed = $true }
+        }
+    }
+    catch {
+        Write-Warning "Could not read report privacy settings (requires ReportSettings.Read.All permission): $_"
+        return @{ WasEnabled = $null; Fixed = $false }
+    }
+}
+
+# Retrieve real site metadata via the Microsoft Graph Sites API.  This endpoint
+# is not subject to the report-privacy concealment setting, so it always returns
+# real site IDs, URLs, and display names.
+function Get-SiteMetadataViaGraph {
+    Write-Host "Retrieving real site metadata from Microsoft Graph Sites API..." -ForegroundColor Cyan
+
+    $allSites = @()
+
+    # Try getAllSites first (works with Sites.Read.All application permission)
+    $uri = '/v1.0/sites/getAllSites?$select=id,displayName,webUrl,createdDateTime&$top=999'
+    try {
+        while ($uri) {
+            $response = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+            if ($response.value) { $allSites += $response.value }
+            $uri = $response.'@odata.nextLink'
+        }
+        Write-Host "Retrieved metadata for $($allSites.Count) sites from Sites API." -ForegroundColor Green
+        return $allSites
+    }
+    catch {
+        Write-Warning "getAllSites endpoint failed, trying search-based approach: $_"
+    }
+
+    # Fallback: search-based approach (works with delegated Sites.Read.All)
+    $uri = "/v1.0/sites?search=*&`$select=id,displayName,webUrl,createdDateTime&`$top=999"
+    try {
+        while ($uri) {
+            $response = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+            if ($response.value) { $allSites += $response.value }
+            $uri = $response.'@odata.nextLink'
+        }
+        Write-Host "Retrieved metadata for $($allSites.Count) sites from Sites API (search)." -ForegroundColor Green
+        return $allSites
+    }
+    catch {
+        Write-Warning "Sites search API also failed: $_"
+        return @()
+    }
+}
+
 # Function to combine SPO and Graph data for best-of-both-worlds reporting
 function Get-UsageReportsCombined {
     param(
@@ -342,9 +483,19 @@ function Get-UsageReportsCombined {
     if ($matchedCount -eq 0 -and $graphData.Count -gt 0) {
         Write-Warning "No SPO sites matched Graph API records by URL. Activity columns (PageViewCount, FileCount, etc.) will be empty."
         Write-Warning "This can occur when the Microsoft 365 admin center privacy setting 'Conceal user, group, and site names in all reports' is enabled."
+        Write-Warning "The script attempted to check and disable the concealment setting automatically. If the setting was recently changed, re-run after 48 hours."
         if ($spoData.Count -gt 0) {
             Write-Warning "  Sample SPO URL:   $($spoData[0].SiteUrl)"
             Write-Warning "  Sample Graph URL: $($graphData[0].SiteUrl)"
+        }
+    }
+    elseif ($matchedCount -gt 0) {
+        # Check whether usage metrics are actually populated (they will be empty
+        # when Graph data came from the Sites API fallback due to report obfuscation).
+        $hasUsageMetrics = $combinedData | Where-Object { $_.PageViewCount -ne '' -and $_.PageViewCount -ne $null } | Select-Object -First 1
+        if (-not $hasUsageMetrics) {
+            Write-Warning "Graph usage metrics (PageViewCount, FileCount, etc.) are empty because the Graph report data was obfuscated."
+            Write-Warning "The report contains real site metadata from SPO and the Sites API. Disable the 'Conceal user, group, and site names in all reports' setting and re-run after 48 hours for full usage metrics."
         }
     }
 
