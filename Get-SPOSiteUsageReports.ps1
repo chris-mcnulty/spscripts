@@ -176,12 +176,12 @@ function Get-UsageReportsViaGraph {
                         OwnerDisplayName        = $realSite.displayName
                         OwnerPrincipalName      = ''
                         IsDeleted               = $false
-                        LastActivityDate        = if ($enrichment -and $enrichment.LastActivityDate) { $enrichment.LastActivityDate } else { '' }
-                        FileCount               = if ($enrichment -and $enrichment.FileCount -ne '') { $enrichment.FileCount } else { '' }
+                        LastActivityDate        = if ($enrichment -and $null -ne $enrichment.LastActivityDate) { $enrichment.LastActivityDate } else { '' }
+                        FileCount               = if ($enrichment -and $null -ne $enrichment.FileCount) { $enrichment.FileCount } else { '' }
                         ActiveFileCount         = ''
-                        PageViewCount           = if ($enrichment -and $enrichment.PageViewCount -ne '') { $enrichment.PageViewCount } else { '' }
+                        PageViewCount           = if ($enrichment -and $null -ne $enrichment.PageViewCount) { $enrichment.PageViewCount } else { '' }
                         VisitedPageCount        = ''
-                        StorageUsedInBytes      = if ($enrichment -and $enrichment.StorageUsedBytes -ne '') { $enrichment.StorageUsedBytes } else { '' }
+                        StorageUsedInBytes      = if ($enrichment -and $null -ne $enrichment.StorageUsedBytes) { $enrichment.StorageUsedBytes } else { '' }
                         StorageAllocatedInBytes = ''
                         RootWebTemplate         = ''
                         ReportRefreshDate       = ''
@@ -379,10 +379,10 @@ function Get-PerSiteAnalyticsViaGraph {
             -PercentComplete (($counter / $total) * 100)
 
         $info = [PSCustomObject]@{
-            PageViewCount    = ''
-            FileCount        = ''
-            StorageUsedBytes = ''
-            LastActivityDate = ''
+            PageViewCount    = $null
+            FileCount        = $null
+            StorageUsedBytes = $null
+            LastActivityDate = $null
         }
 
         # --- Site analytics (page views) ---
@@ -414,7 +414,8 @@ function Get-PerSiteAnalyticsViaGraph {
             # Drive not available for this site — continue silently
         }
 
-        # --- File count via root children count ---
+        # --- File count via root children count (closest approximation to the
+        #     report's FileCount; includes both files and sub-folders at root) ---
         try {
             $rootResp = Invoke-MgGraphRequest -Method GET `
                 -Uri "/v1.0/sites/$siteId/drive/root?`$select=folder" `
@@ -433,7 +434,7 @@ function Get-PerSiteAnalyticsViaGraph {
     }
 
     Write-Progress -Activity "Retrieving per-site analytics" -Completed
-    $populated = ($analytics.Values | Where-Object { $_.PageViewCount -ne '' }).Count
+    $populated = ($analytics.Values | Where-Object { $null -ne $_.PageViewCount }).Count
     Write-Host "Retrieved analytics for $populated of $total sites." -ForegroundColor Green
 
     return $analytics
