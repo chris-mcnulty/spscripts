@@ -4,7 +4,7 @@
 This PowerShell script enumerates usage reports from all SharePoint sites in a tenant and exports the data to a CSV file. It provides comprehensive site usage statistics including storage usage, activity dates, file counts, and more.
 
 ## Features
-- **Two Methods**: Choose between Microsoft Graph API or SharePoint Online Management Shell
+- **Three Methods**: Choose between Microsoft Graph API, SharePoint Online Management Shell, or a Combined mode that merges the best of both
 - **Comprehensive Data**: Collects detailed usage statistics for all sites in the tenant
 - **Automatic Module Installation**: Detects and installs required PowerShell modules
 - **Progress Tracking**: Shows real-time progress when processing multiple sites
@@ -24,6 +24,11 @@ This PowerShell script enumerates usage reports from all SharePoint sites in a t
 - Microsoft.Graph.Reports module (auto-installed if missing)
 - Microsoft.Graph.Authentication module (auto-installed if missing)
 - Reports.Read.All and Sites.Read.All permissions
+
+### For Combined Mode
+- PowerShell 5.1 or later
+- All modules from both methods above (auto-installed if missing)
+- Both SharePoint Administrator role and Graph API permissions
 
 ## Installation
 
@@ -55,6 +60,12 @@ This will:
 ```
 This method provides additional metrics like page views and active file counts.
 
+### Combined Mode (Best of Both)
+```powershell
+.\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined
+```
+This mode merges SPO Management Shell data (friendly site names, owners, storage in MB) with Graph API data (page views, active file counts, activity dates) into a single report. Sites are matched by URL.
+
 ### Specify Output Path
 ```powershell
 .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -OutputPath "C:\Reports\MyUsageReport.csv"
@@ -77,6 +88,7 @@ This method provides additional metrics like page views and active file counts.
 | OutputPath | String | No | Auto-generated | Full path for the output CSV file. If not specified, creates a timestamped file in script directory |
 | AuthMethod | String | No | Interactive | Authentication method: 'Interactive', 'Certificate', or 'ClientSecret' |
 | UseGraphAPI | Switch | No | False | Use Microsoft Graph API instead of SharePoint Online Management Shell |
+| UseCombined | Switch | No | False | Combine SPO Management Shell (friendly names) with Graph API (page views/activity) into a single report |
 
 ## Output Data
 
@@ -125,6 +137,29 @@ The CSV file includes:
 - **ReportRefreshDate**: When the report was generated
 - **ReportPeriod**: Report period (e.g., last 7 days)
 
+### Combined Mode
+The combined mode merges the best of both approaches, using SPO Management Shell for friendly site metadata and Graph API for activity metrics. The CSV file includes:
+- **SiteUrl**: Full URL of the site (from SPO)
+- **Title**: Site title (from SPO)
+- **Owner**: Site owner email/username (from SPO)
+- **Template**: Site template type (from SPO)
+- **StorageUsedMB**: Current storage usage in megabytes (from SPO)
+- **StorageQuotaMB**: Storage quota in megabytes (from SPO)
+- **StorageUsedPercentage**: Percentage of storage quota used (from SPO)
+- **LastContentModifiedDate**: Date of last content modification (from SPO)
+- **LastActivityDate**: Date of last activity (from Graph)
+- **FileCount**: Total number of files (from Graph)
+- **ActiveFileCount**: Number of active files (from Graph)
+- **PageViewCount**: Number of page views in last 7 days (from Graph)
+- **VisitedPageCount**: Number of distinct pages visited in last 7 days (from Graph)
+- **SharingCapability**: External sharing settings (from SPO)
+- **LockState**: Site lock status (from SPO)
+- **IsHubSite**: Whether the site is a hub site (from SPO)
+- **HubSiteId**: Hub site ID if connected to a hub (from SPO)
+- **SensitivityLabel**: Applied sensitivity label (from SPO)
+- **RootWebTemplate**: Site template (from Graph)
+- **CreatedDate**: Site creation date (from SPO)
+
 ## Examples
 
 ### Example 1: Quick Report for Contoso Tenant
@@ -139,7 +174,13 @@ Output: `SPO_SiteUsage_contoso_20260212_143022.csv`
 ```
 Provides additional metrics like page views and active file counts.
 
-### Example 3: Automated Monthly Report
+### Example 3: Combined Report with Friendly Names and Page Views
+```powershell
+.\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined -OutputPath "C:\Reports\Combined_Usage.csv"
+```
+Merges SPO friendly site info (titles, owners, storage in MB) with Graph activity metrics (page views, active files).
+
+### Example 4: Automated Monthly Report
 ```powershell
 # Schedule this script to run monthly via Task Scheduler
 $monthYear = Get-Date -Format "yyyy-MM"
@@ -214,6 +255,9 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **1.1.0** (2026-02-12): Combined mode
+  - New `-UseCombined` switch merges SPO + Graph data into one report
+  - Friendly names/owners from SPO with page views/activity from Graph
 - **1.0.0** (2026-02-12): Initial release
   - Support for SharePoint Online Management Shell
   - Support for Microsoft Graph API
