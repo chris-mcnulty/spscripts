@@ -169,7 +169,13 @@ function Get-UsageReportsViaGraph {
                     $mgSite = Get-MgSite -SiteId $blankSite.SiteId -Property "id,displayName,webUrl" -ErrorAction Stop
                     if ($mgSite) {
                         if ($mgSite.WebUrl)      { $blankSite.SiteUrl = $mgSite.WebUrl }
-                        if ($mgSite.DisplayName)  { $blankSite.OwnerDisplayName = $mgSite.DisplayName }
+                        # Store the site display name so it can be used as a fallback
+                        # title/label when the OwnerDisplayName is obfuscated.
+                        if ($mgSite.DisplayName -and
+                            ($blankSite.OwnerDisplayName -match '^[A-Fa-f0-9]{32}$' -or
+                             [string]::IsNullOrWhiteSpace($blankSite.OwnerDisplayName))) {
+                            $blankSite.OwnerDisplayName = $mgSite.DisplayName
+                        }
                         $resolvedCount++
                     }
                 }
@@ -659,7 +665,7 @@ function Get-UsageReportsCombined {
         # Build combined row: Graph metrics + SPO friendly metadata (or resolved metadata)
         $siteUrl = if ($spoSite) { $spoSite.SiteUrl } elseif ($resolvedWebUrl) { $resolvedWebUrl } elseif ($graphSite.SiteUrl) { $graphSite.SiteUrl } else { '' }
         $title = if ($spoSite) { $spoSite.Title } elseif ($resolvedDisplayName) { $resolvedDisplayName } else { '' }
-        $owner = if ($spoSite) { $spoSite.Owner } elseif ($resolvedDisplayName) { $graphSite.OwnerDisplayName } else { $graphSite.OwnerDisplayName }
+        $owner = if ($spoSite) { $spoSite.Owner } else { $graphSite.OwnerDisplayName }
 
         $combined = [PSCustomObject]@{
             SiteUrl                 = $siteUrl
