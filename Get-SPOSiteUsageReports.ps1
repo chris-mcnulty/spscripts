@@ -162,29 +162,33 @@ function Get-UsageReportsViaGraph {
             $realSites = Get-SiteMetadataViaGraph
 
             if ($realSites.Count -gt 0) {
-                Write-Host "Building report from Sites API metadata. Per-site usage metrics (page views, file counts) are unavailable while report data is obfuscated." -ForegroundColor Yellow
+                Write-Host "Enriching site metadata with per-site analytics (not affected by report concealment)..." -ForegroundColor Yellow
+
+                # Get per-site analytics — these endpoints are NOT subject to report privacy.
+                $siteAnalytics = Get-PerSiteAnalyticsViaGraph -Sites $realSites
 
                 $usageData = @()
                 foreach ($realSite in $realSites) {
+                    $enrichment = if ($realSite.webUrl) { $siteAnalytics[$realSite.webUrl] } else { $null }
                     $usageData += [PSCustomObject]@{
                         SiteUrl                 = $realSite.webUrl
                         SiteId                  = $realSite.id
                         OwnerDisplayName        = $realSite.displayName
                         OwnerPrincipalName      = ''
                         IsDeleted               = $false
-                        LastActivityDate        = ''
-                        FileCount               = ''
+                        LastActivityDate        = if ($enrichment -and $enrichment.LastActivityDate) { $enrichment.LastActivityDate } else { '' }
+                        FileCount               = if ($enrichment -and $enrichment.FileCount -ne '') { $enrichment.FileCount } else { '' }
                         ActiveFileCount         = ''
-                        PageViewCount           = ''
+                        PageViewCount           = if ($enrichment -and $enrichment.PageViewCount -ne '') { $enrichment.PageViewCount } else { '' }
                         VisitedPageCount        = ''
-                        StorageUsedInBytes      = ''
+                        StorageUsedInBytes      = if ($enrichment -and $enrichment.StorageUsedBytes -ne '') { $enrichment.StorageUsedBytes } else { '' }
                         StorageAllocatedInBytes = ''
                         RootWebTemplate         = ''
                         ReportRefreshDate       = ''
                         ReportPeriod            = ''
                     }
                 }
-                Write-Host "Rebuilt report with $($usageData.Count) sites using real site metadata from Sites API." -ForegroundColor Green
+                Write-Host "Rebuilt report with $($usageData.Count) sites using real site metadata and per-site analytics." -ForegroundColor Green
             }
             else {
                 Write-Warning "Could not retrieve site metadata from Sites API. Report will contain obfuscated data."
@@ -348,6 +352,93 @@ function Resolve-GraphReportPrivacy {
     }
 }
 
+# Retrieve per-site analytics and drive information via the Microsoft Graph
+# Sites API.  These endpoints are NOT subject to the report-privacy concealment
+# setting, so they always return real data.  For each site the function queries:
+#   /sites/{id}/analytics/lastSevenDays  → access.actionCount (page views)
+#   /sites/{id}/drive                    → quota/driveItem info
+# Sites for which the call fails (permissions, missing drive, etc.) are silently
+# skipped.  Returns a hashtable mapping webUrl → enrichment object.
+function Get-PerSiteAnalyticsViaGraph {
+    param([array]$Sites)
+
+    $analytics = @{}
+    $total = $Sites.Count
+    $counter = 0
+
+    Write-Host "Retrieving per-site analytics for $total sites (this may take a moment)..." -ForegroundColor Cyan
+
+    foreach ($site in $Sites) {
+        $counter++
+        $siteId  = $site.id
+        $webUrl  = $site.webUrl
+        if (-not $siteId) { continue }
+
+        Write-Progress -Activity "Retrieving per-site analytics" `
+            -Status "Processing $counter of $total" `
+            -PercentComplete (($counter / $total) * 100)
+
+        $info = [PSCustomObject]@{
+            PageViewCount    = ''
+            FileCount        = ''
+            StorageUsedBytes = ''
+            LastActivityDate = ''
+        }
+
+        # --- Site analytics (page views) ---
+        try {
+            $resp = Invoke-MgGraphRequest -Method GET `
+                -Uri "/v1.0/sites/$siteId/analytics/lastSevenDays" `
+                -ErrorAction Stop
+            if ($resp.access) {
+                $info.PageViewCount = $resp.access.actionCount
+            }
+        }
+        catch {
+            # Analytics not available for this site — continue silently
+        }
+
+        # --- Drive info (file count + storage) ---
+        try {
+            $driveResp = Invoke-MgGraphRequest -Method GET `
+                -Uri "/v1.0/sites/$siteId/drive?`$select=quota,lastModifiedDateTime" `
+                -ErrorAction Stop
+            if ($driveResp.quota) {
+                $info.StorageUsedBytes = $driveResp.quota.used
+            }
+            if ($driveResp.lastModifiedDateTime) {
+                $info.LastActivityDate = $driveResp.lastModifiedDateTime
+            }
+        }
+        catch {
+            # Drive not available for this site — continue silently
+        }
+
+        # --- File count via root children count ---
+        try {
+            $rootResp = Invoke-MgGraphRequest -Method GET `
+                -Uri "/v1.0/sites/$siteId/drive/root?`$select=folder" `
+                -ErrorAction Stop
+            if ($rootResp.folder) {
+                $info.FileCount = $rootResp.folder.childCount
+            }
+        }
+        catch {
+            # Root folder not available — continue silently
+        }
+
+        if ($webUrl) {
+            $analytics[$webUrl] = $info
+        }
+    }
+
+    Write-Progress -Activity "Retrieving per-site analytics" -Completed
+    $populated = ($analytics.Values | Where-Object { $_.PageViewCount -ne '' }).Count
+    Write-Host "Retrieved analytics for $populated of $total sites." -ForegroundColor Green
+
+    return $analytics
+}
+
 # Retrieve real site metadata via the Microsoft Graph Sites API.  This endpoint
 # is not subject to the report-privacy concealment setting, so it always returns
 # real site IDs, URLs, and display names.
@@ -490,12 +581,20 @@ function Get-UsageReportsCombined {
         }
     }
     elseif ($matchedCount -gt 0) {
-        # Check whether usage metrics are actually populated (they will be empty
-        # when Graph data came from the Sites API fallback due to report obfuscation).
-        $hasUsageMetrics = $combinedData | Where-Object { -not [string]::IsNullOrEmpty($_.PageViewCount) } | Select-Object -First 1
-        if (-not $hasUsageMetrics) {
-            Write-Warning "Graph usage metrics (PageViewCount, FileCount, etc.) are empty because the Graph report data was obfuscated."
-            Write-Warning "The report contains real site metadata from SPO and the Sites API. Disable the 'Conceal user, group, and site names in all reports' setting and re-run after 48 hours for full usage metrics."
+        # Check whether page view metrics are populated — they will be filled via
+        # per-site analytics even when the report was obfuscated, but some fields
+        # like ActiveFileCount and VisitedPageCount are only available from the
+        # reports endpoint and may still be empty.
+        $hasPageViews = $combinedData | Where-Object { -not [string]::IsNullOrEmpty($_.PageViewCount) } | Select-Object -First 1
+        if (-not $hasPageViews) {
+            Write-Warning "Page view metrics could not be retrieved because both the Graph report and per-site analytics returned no data."
+            Write-Warning "Disable the 'Conceal user, group, and site names in all reports' setting and re-run after 48 hours for complete report metrics."
+        }
+        else {
+            $hasActiveFile = $combinedData | Where-Object { -not [string]::IsNullOrEmpty($_.ActiveFileCount) } | Select-Object -First 1
+            if (-not $hasActiveFile) {
+                Write-Host "Note: ActiveFileCount and VisitedPageCount are unavailable while Graph report data is obfuscated. PageViewCount and FileCount were retrieved from per-site analytics." -ForegroundColor Yellow
+            }
         }
     }
 

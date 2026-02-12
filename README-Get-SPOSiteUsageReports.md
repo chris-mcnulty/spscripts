@@ -221,11 +221,12 @@ The script now handles this automatically:
 1. **Detects obfuscated data** by checking for zeroed SiteIds, empty URLs, and hashed owner names
 2. **Checks the admin setting** via `GET /admin/reportSettings` and **attempts to disable it** via `PATCH /admin/reportSettings` (requires `ReportSettings.ReadWrite.All` permission)
 3. **Falls back to the Microsoft Graph Sites API** (`/sites/getAllSites`) which is not affected by the report-privacy setting, providing real site URLs, IDs, and display names
+4. **Retrieves per-site analytics** via `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` to populate page views, file counts, storage, and last activity dates — these endpoints are **not subject to the concealment setting**
 
 **Important notes:**
 - After disabling the concealment setting, report data can take **up to 48 hours** to reflect the change
-- Per-site usage metrics (page views, file counts) are only available from the Reports API and will be empty while the data is still obfuscated
-- The Sites API fallback ensures you always get real site metadata regardless of the concealment setting
+- `ActiveFileCount` and `VisitedPageCount` are only available from the Reports API and will be empty while the data is still obfuscated
+- Most key metrics (PageViewCount, FileCount, LastActivityDate, StorageUsedInBytes) are retrieved via per-site analytics even when the report is obfuscated
 - Grant `ReportSettings.ReadWrite.All` permission for automatic setting correction
 
 ## Permissions Required
@@ -275,7 +276,8 @@ This script is provided as-is without warranty. Use at your own risk.
   - Automatic detection of obfuscated Graph report data (zeroed SiteIds, hashed names)
   - Proactive check and correction of the admin report-privacy concealment setting
   - Sites API fallback (`/sites/getAllSites`) for real site metadata when reports are obfuscated
-  - Improved combined mode warnings when usage metrics are unavailable
+  - Per-site analytics enrichment via `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` to retrieve page views, file counts, storage, and last activity dates even when the report is obfuscated
+  - Improved combined mode diagnostics when partial metrics are unavailable
 - **1.1.0** (2026-02-12): Combined mode
   - New `-UseCombined` switch merges SPO + Graph data into one report
   - Friendly names/owners from SPO with page views/activity from Graph
