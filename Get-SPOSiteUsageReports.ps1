@@ -658,11 +658,11 @@ function Get-UsageReportsCombined {
 
         # Try 3: resolve SiteId directly via Get-MgSite to get displayName & webUrl,
         # then try matching the resolved webUrl back to SPO for full metadata.
-        # Construct the compound SiteId: "hostname,siteGuid,siteGuid" (for root webs).
+        # Graph report SiteIds are simple GUIDs; construct the compound ID that
+        # Get-MgSite requires: "hostname,siteGuid,siteGuid" (root web = site GUID).
         if (-not $spoSite -and $graphSite.SiteId -and $graphSite.SiteId -ne $emptyGuid) {
             try {
-                $siteGuid = ($graphSite.SiteId -split ',')[-1]
-                $compoundId = "$TenantName.sharepoint.com,$siteGuid,$siteGuid"
+                $compoundId = "$TenantName.sharepoint.com,$($graphSite.SiteId),$($graphSite.SiteId)"
                 $mgSite = Get-MgSite -SiteId $compoundId -Property "id,displayName,webUrl" -ErrorAction Stop
                 if ($mgSite) {
                     $resolvedDisplayName = $mgSite.DisplayName
