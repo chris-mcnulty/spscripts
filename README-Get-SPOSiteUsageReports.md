@@ -1,0 +1,214 @@
+# Get-SPOSiteUsageReports.ps1
+
+## Overview
+This PowerShell script enumerates usage reports from all SharePoint sites in a tenant and exports the data to a CSV file. It provides comprehensive site usage statistics including storage usage, activity dates, file counts, and more.
+
+## Features
+- **Two Methods**: Choose between Microsoft Graph API or SharePoint Online Management Shell
+- **Comprehensive Data**: Collects detailed usage statistics for all sites in the tenant
+- **Automatic Module Installation**: Detects and installs required PowerShell modules
+- **Progress Tracking**: Shows real-time progress when processing multiple sites
+- **Error Handling**: Robust error handling with detailed logging
+- **Flexible Output**: Customizable CSV output path with automatic timestamping
+- **Summary Statistics**: Displays aggregate statistics after export
+
+## Prerequisites
+
+### For SharePoint Online Management Shell Method (Default)
+- PowerShell 5.1 or later
+- Microsoft.Online.SharePoint.PowerShell module (auto-installed if missing)
+- SharePoint Administrator or Global Administrator role
+
+### For Microsoft Graph API Method
+- PowerShell 5.1 or later
+- Microsoft.Graph.Reports module (auto-installed if missing)
+- Microsoft.Graph.Authentication module (auto-installed if missing)
+- Reports.Read.All and Sites.Read.All permissions
+
+## Installation
+
+1. Download the script:
+```powershell
+# Clone the repository
+git clone https://github.com/chris-mcnulty/spscripts.git
+cd spscripts
+```
+
+2. Ensure you have appropriate permissions in your SharePoint tenant
+
+3. Run the script (modules will be auto-installed if needed)
+
+## Usage
+
+### Basic Usage (SharePoint Online Management Shell)
+```powershell
+.\Get-SPOSiteUsageReports.ps1 -TenantName "contoso"
+```
+This will:
+- Connect to contoso.sharepoint.com
+- Retrieve usage data for all sites
+- Export to a timestamped CSV file in the current directory
+
+### Using Microsoft Graph API
+```powershell
+.\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseGraphAPI
+```
+This method provides additional metrics like page views and active file counts.
+
+### Specify Output Path
+```powershell
+.\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -OutputPath "C:\Reports\MyUsageReport.csv"
+```
+
+### Complete Example with All Parameters
+```powershell
+.\Get-SPOSiteUsageReports.ps1 `
+    -TenantName "contoso" `
+    -OutputPath "C:\Reports\usage.csv" `
+    -AuthMethod "Interactive" `
+    -UseGraphAPI
+```
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| TenantName | String | Yes | - | Your SharePoint tenant name (e.g., 'contoso' for contoso.sharepoint.com) |
+| OutputPath | String | No | Auto-generated | Full path for the output CSV file. If not specified, creates a timestamped file in script directory |
+| AuthMethod | String | No | Interactive | Authentication method: 'Interactive', 'Certificate', or 'ClientSecret' |
+| UseGraphAPI | Switch | No | False | Use Microsoft Graph API instead of SharePoint Online Management Shell |
+
+## Output Data
+
+### SharePoint Online Management Shell Method
+The CSV file includes:
+- **SiteUrl**: Full URL of the site
+- **Title**: Site title
+- **Owner**: Site owner email/username
+- **Template**: Site template type
+- **Status**: Site status (Active, ReadOnly, etc.)
+- **StorageQuotaMB**: Storage quota in megabytes
+- **StorageUsedMB**: Current storage usage in megabytes
+- **StorageUsedPercentage**: Percentage of storage quota used
+- **LastContentModifiedDate**: Date of last content modification
+- **SharingCapability**: External sharing settings
+- **LockState**: Site lock status
+- **WebsCount**: Number of subsites
+- **IsHubSite**: Whether the site is a hub site
+- **HubSiteId**: Hub site ID if connected to a hub
+- **SensitivityLabel**: Applied sensitivity label
+- **CreatedDate**: Site creation date
+
+### Microsoft Graph API Method
+The CSV file includes:
+- **SiteUrl**: Full URL of the site
+- **SiteId**: Unique site identifier
+- **OwnerDisplayName**: Display name of the owner
+- **OwnerPrincipalName**: Owner's principal name
+- **IsDeleted**: Whether the site is deleted
+- **LastActivityDate**: Date of last activity
+- **FileCount**: Total number of files
+- **ActiveFileCount**: Number of active files
+- **PageViewCount**: Number of page views
+- **VisitedPageCount**: Number of visited pages
+- **StorageUsedInBytes**: Storage used in bytes
+- **StorageAllocatedInBytes**: Allocated storage in bytes
+- **RootWebTemplate**: Site template
+- **ReportRefreshDate**: When the report was generated
+- **ReportPeriod**: Report period (e.g., last 7 days)
+
+## Examples
+
+### Example 1: Quick Report for Contoso Tenant
+```powershell
+.\Get-SPOSiteUsageReports.ps1 -TenantName "contoso"
+```
+Output: `SPO_SiteUsage_contoso_20260212_143022.csv`
+
+### Example 2: Detailed Report Using Graph API
+```powershell
+.\Get-SPOSiteUsageReports.ps1 -TenantName "fabrikam" -UseGraphAPI -OutputPath "D:\Reports\Fabrikam_Usage.csv"
+```
+Provides additional metrics like page views and active file counts.
+
+### Example 3: Automated Monthly Report
+```powershell
+# Schedule this script to run monthly via Task Scheduler
+$monthYear = Get-Date -Format "yyyy-MM"
+$outputPath = "\\fileserver\Reports\SharePoint\Usage_$monthYear.csv"
+
+.\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -OutputPath $outputPath -UseGraphAPI
+```
+
+## Troubleshooting
+
+### Issue: Module Installation Fails
+**Solution**: Run PowerShell as Administrator or use `-Scope CurrentUser` when installing modules manually:
+```powershell
+Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -Force
+```
+
+### Issue: Authentication Fails
+**Solution**: Ensure you have the required permissions:
+- For SPO method: SharePoint Administrator or Global Administrator
+- For Graph method: Reports.Read.All and Sites.Read.All permissions
+
+### Issue: Script Takes Too Long
+**Solution**: 
+- Use the `-UseGraphAPI` switch for faster processing
+- The Graph API method is generally faster for large tenants
+- For SPO method, the script processes sites one by one with progress indicators
+
+### Issue: Some Sites Missing from Report
+**Solution**:
+- Check that you have access to all sites
+- Personal sites are excluded by default; modify the script if needed
+- Some sites may be hidden or require special permissions
+
+## Permissions Required
+
+### SharePoint Online Management Shell Method
+- SharePoint Administrator role, or
+- Global Administrator role
+
+### Microsoft Graph API Method
+Application permissions needed:
+- Reports.Read.All
+- Sites.Read.All
+
+Or delegated permissions:
+- Reports.Read.All
+- Sites.Read.All
+
+## Best Practices
+
+1. **Run during off-peak hours**: For large tenants, run the script during off-peak hours to minimize impact
+2. **Regular exports**: Schedule regular exports to track usage trends over time
+3. **Store securely**: Store output CSV files in a secure location as they contain sensitive information
+4. **Review permissions**: Regularly review and ensure you have the minimum required permissions
+5. **Graph API for scale**: For tenants with 1000+ sites, use the Graph API method for better performance
+
+## Limitations
+
+- Personal sites (OneDrive) are excluded by default in the SPO method
+- Graph API method provides data for the last 7 days by default
+- Rate limiting may occur with very large tenants (10,000+ sites)
+- Some fields may be empty depending on site configuration and permissions
+
+## Support
+
+For issues, questions, or contributions, please visit:
+https://github.com/chris-mcnulty/spscripts
+
+## License
+
+This script is provided as-is without warranty. Use at your own risk.
+
+## Version History
+
+- **1.0.0** (2026-02-12): Initial release
+  - Support for SharePoint Online Management Shell
+  - Support for Microsoft Graph API
+  - Automatic module installation
+  - Comprehensive usage data export
+  - Progress tracking and error handling
