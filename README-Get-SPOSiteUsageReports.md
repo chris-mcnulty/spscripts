@@ -100,6 +100,14 @@ The CSV file includes:
 - **CreatedDate**: Site creation date
 
 ### Microsoft Graph API Method
+The Graph method retrieves usage data — including page views — as follows:
+
+1. The script calls `Get-MgReportSharePointSiteUsageDetail -Period D7`, which wraps the Microsoft Graph REST API endpoint [`getSharePointSiteUsageDetail`](https://learn.microsoft.com/en-us/graph/api/reportroot-getsharepointsiteusagedetail).
+2. That endpoint returns a CSV report where each row is a site and columns include `Page View Count` and `Visited Page Count`.
+3. The script parses the CSV with `ConvertFrom-Csv` and maps those columns to the output fields listed below.
+
+Page views are tracked server-side by SharePoint and surfaced through this report; there is no separate API call to fetch them.
+
 The CSV file includes:
 - **SiteUrl**: Full URL of the site
 - **SiteId**: Unique site identifier
@@ -109,8 +117,8 @@ The CSV file includes:
 - **LastActivityDate**: Date of last activity
 - **FileCount**: Total number of files
 - **ActiveFileCount**: Number of active files
-- **PageViewCount**: Number of page views
-- **VisitedPageCount**: Number of visited pages
+- **PageViewCount**: Number of page views (from the report's `Page View Count` column)
+- **VisitedPageCount**: Number of distinct pages visited (from the report's `Visited Page Count` column)
 - **StorageUsedInBytes**: Storage used in bytes
 - **StorageAllocatedInBytes**: Allocated storage in bytes
 - **RootWebTemplate**: Site template
