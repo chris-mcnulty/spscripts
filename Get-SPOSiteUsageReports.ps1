@@ -404,7 +404,8 @@ try {
             # All retries failed — write to a fallback file with a timestamp suffix
             $fallbackName = [System.IO.Path]::GetFileNameWithoutExtension($OutputPath) +
                 "_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".csv"
-            $fallbackPath = Join-Path -Path (Split-Path -Path $OutputPath -Parent) -ChildPath $fallbackName
+            $fallbackDir = Split-Path -Path $OutputPath -Parent
+            $fallbackPath = if ($fallbackDir) { Join-Path -Path $fallbackDir -ChildPath $fallbackName } else { $fallbackName }
             Write-Warning "Could not write to '$OutputPath' because it is locked by another process (e.g., Excel)."
             Write-Warning "Saving report to fallback location: $fallbackPath"
             $usageData | Export-Csv -Path $fallbackPath -NoTypeInformation -Encoding UTF8
