@@ -64,7 +64,7 @@ This method provides additional metrics like page views and active file counts.
 ```powershell
 .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined
 ```
-This mode merges SPO Management Shell data (friendly site names, owners, storage in MB) with Graph API data (page views, active file counts, activity dates) into a single report. Sites are first matched by URL. When Graph report URLs are blank due to the concealment privacy setting, the script automatically falls back to SiteId-based matching by resolving each SPO URL to its Graph Site ID. Any remaining unmatched sites are enriched with per-site analytics via direct Graph API calls.
+This mode starts from the Graph API report (which has SiteIds and usage metrics for every site), then enriches each row with friendly metadata (Title, Owner, Template, etc.) from SPO. Sites are matched by URL first; when Graph URLs are blank, SPO URLs are resolved to SiteIds for matching. This approach ensures one row per site with no duplicates.
 
 ### Specify Output Path
 ```powershell
@@ -138,27 +138,31 @@ The CSV file includes:
 - **ReportPeriod**: Report period (e.g., last 7 days)
 
 ### Combined Mode
-The combined mode merges the best of both approaches, using SPO Management Shell for friendly site metadata and Graph API for activity metrics. The CSV file includes:
-- **SiteUrl**: Full URL of the site (from SPO)
-- **Title**: Site title (from SPO)
-- **Owner**: Site owner email/username (from SPO)
-- **Template**: Site template type (from SPO)
-- **StorageUsedMB**: Current storage usage in megabytes (from SPO)
-- **StorageQuotaMB**: Storage quota in megabytes (from SPO)
-- **StorageUsedPercentage**: Percentage of storage quota used (from SPO)
-- **LastContentModifiedDate**: Date of last content modification (from SPO)
+The combined mode starts from the Graph API report (authoritative list of all sites with usage metrics) and enriches each row with friendly site metadata from SPO. The CSV file includes:
+- **SiteUrl**: Full URL of the site (from SPO when matched, otherwise from Graph)
+- **SiteId**: Graph Site ID (from Graph)
+- **Title**: Site title (from SPO when matched)
+- **Owner**: Site owner email/username (from SPO when matched, Graph OwnerDisplayName otherwise)
+- **OwnerPrincipalName**: Owner UPN (from Graph)
+- **Template**: Site template type (from SPO when matched)
+- **StorageUsedMB**: Current storage usage in megabytes (from SPO when matched, Graph otherwise)
+- **StorageQuotaMB**: Storage quota in megabytes (from SPO when matched, Graph otherwise)
+- **StorageUsedPercentage**: Percentage of storage quota used (from SPO when matched)
+- **LastContentModifiedDate**: Date of last content modification (from SPO when matched)
 - **LastActivityDate**: Date of last activity (from Graph)
 - **FileCount**: Total number of files (from Graph)
 - **ActiveFileCount**: Number of active files (from Graph)
 - **PageViewCount**: Number of page views in last 7 days (from Graph)
 - **VisitedPageCount**: Number of distinct pages visited in last 7 days (from Graph)
-- **SharingCapability**: External sharing settings (from SPO)
-- **LockState**: Site lock status (from SPO)
-- **IsHubSite**: Whether the site is a hub site (from SPO)
-- **HubSiteId**: Hub site ID if connected to a hub (from SPO)
-- **SensitivityLabel**: Applied sensitivity label (from SPO)
+- **SharingCapability**: External sharing settings (from SPO when matched)
+- **LockState**: Site lock status (from SPO when matched)
+- **IsHubSite**: Whether the site is a hub site (from SPO when matched)
+- **HubSiteId**: Hub site ID if connected to a hub (from SPO when matched)
+- **SensitivityLabel**: Applied sensitivity label (from SPO when matched)
 - **RootWebTemplate**: Site template (from Graph)
-- **CreatedDate**: Site creation date (from SPO)
+- **IsDeleted**: Whether the site has been deleted (from Graph)
+- **CreatedDate**: Site creation date (from SPO when matched)
+- **ReportRefreshDate**: When the Graph report was generated
 
 ## Examples
 
@@ -272,6 +276,11 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **1.4.0** (2026-02-12): Reversed combined mode — Graph-first approach
+  - Combined mode now starts from Graph report data (authoritative list with SiteIds and all usage metrics)
+  - Each Graph site row is enriched with SPO metadata (Title, Owner, Template, etc.) when a match is found
+  - Eliminates duplicate rows that occurred when starting from SPO and appending unmatched Graph sites
+  - Matching: URL first, then SiteId (SPO URLs resolved to Graph SiteIds via `/sites/{hostname}:/{path}`)
 - **1.3.0** (2026-02-12): SiteId-based matching for combined mode
   - Combined mode now falls back to SiteId-based matching when Graph report URLs are blank/obfuscated
   - Each SPO site URL is resolved to its Graph Site ID via `/sites/{hostname}:/{path}`, then matched to Graph report data by SiteId
