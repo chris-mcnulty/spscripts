@@ -219,7 +219,7 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 
 The script now handles this automatically:
 1. **Detects obfuscated data** by checking for zeroed SiteIds, empty URLs, and hashed owner names
-2. **Checks the admin setting** via `GET /admin/reportSettings` and **attempts to disable it** via `PATCH /admin/reportSettings` (requires `ReportSettings.ReadWrite.All` permission)
+2. **Checks the admin setting** via `(Get-MgAdminReportSetting).DisplayConcealedNames` and **attempts to disable it** via `Update-MgAdminReportSetting -DisplayConcealedNames:$false` (requires `ReportSettings.ReadWrite.All` permission)
 3. **Falls back to the Microsoft Graph Sites API** (`/sites/getAllSites`) which is not affected by the report-privacy setting, providing real site URLs, IDs, and display names
 4. **Retrieves per-site analytics** via `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` to populate page views, file counts, storage, and last activity dates — these endpoints are **not subject to the concealment setting**
 
@@ -272,6 +272,9 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **1.2.1** (2026-02-12): Use proper Graph SDK cmdlets for report settings
+  - Replaced raw `Invoke-MgGraphRequest` calls with `Get-MgAdminReportSetting` and `Update-MgAdminReportSetting` for reliable concealment setting detection and correction
+  - Added explicit logging of the actual `DisplayConcealedNames` value so users can confirm the setting
 - **1.2.0** (2026-02-12): Graph API obfuscation handling
   - Automatic detection of obfuscated Graph report data (zeroed SiteIds, hashed names)
   - Proactive check and correction of the admin report-privacy concealment setting

@@ -316,23 +316,27 @@ function Test-GraphDataObfuscated {
     return $false
 }
 
-# Check the tenant admin report-privacy setting via the Graph API and, if
+# Check the tenant admin report-privacy setting using the Graph PowerShell SDK
+# cmdlets (Get-MgAdminReportSetting / Update-MgAdminReportSetting) and, if
 # concealment is enabled, attempt to disable it so that future reports contain
 # real identifiers.  Returns a hashtable:
 #   WasEnabled - $true/$false/$null (null = could not read the setting)
 #   Fixed      - $true if the setting is now disabled
 function Resolve-GraphReportPrivacy {
     try {
-        $settings = Invoke-MgGraphRequest -Method GET -Uri '/v1.0/admin/reportSettings' -ErrorAction Stop
+        # Use the typed Graph SDK cmdlet — more reliable than raw Invoke-MgGraphRequest.
+        $reportSetting = Get-MgAdminReportSetting -ErrorAction Stop
+        $concealed = $reportSetting.DisplayConcealedNames
 
-        if ($settings.displayConcealedNames) {
-            Write-Warning "Report privacy setting 'Conceal user, group, and site names in all reports' is ENABLED in your tenant."
-            Write-Host "Attempting to disable the concealment setting..." -ForegroundColor Yellow
+        Write-Host "Current DisplayConcealedNames value: $concealed" -ForegroundColor Cyan
+
+        if ($concealed -eq $true) {
+            Write-Warning "Report privacy setting 'Conceal user, group, and site names in all reports' is ENABLED in your tenant (DisplayConcealedNames = True)."
+            Write-Host "Attempting to disable the concealment setting via Update-MgAdminReportSetting..." -ForegroundColor Yellow
             try {
-                $body = @{ displayConcealedNames = $false } | ConvertTo-Json
-                Invoke-MgGraphRequest -Method PATCH -Uri '/v1.0/admin/reportSettings' `
-                    -Body $body -ContentType 'application/json' -ErrorAction Stop
-                Write-Host "Concealment setting has been disabled. Note: report data may take up to 48 hours to reflect this change." -ForegroundColor Green
+                Update-MgAdminReportSetting -DisplayConcealedNames:$false -ErrorAction Stop
+                Write-Host "Concealment setting has been disabled (DisplayConcealedNames set to False)." -ForegroundColor Green
+                Write-Host "Note: report data may take up to 48 hours to reflect this change." -ForegroundColor Yellow
                 Write-Host "Re-run this script after the propagation period for fully de-obfuscated data." -ForegroundColor Yellow
                 return @{ WasEnabled = $true; Fixed = $true }
             }
@@ -342,12 +346,12 @@ function Resolve-GraphReportPrivacy {
             }
         }
         else {
-            Write-Host "Report concealment setting is already disabled in the admin center." -ForegroundColor Green
+            Write-Host "Report concealment setting is already disabled (DisplayConcealedNames = False)." -ForegroundColor Green
             return @{ WasEnabled = $false; Fixed = $true }
         }
     }
     catch {
-        Write-Warning "Could not read report privacy settings (requires ReportSettings.Read.All permission): $_"
+        Write-Warning "Could not read report privacy settings via Get-MgAdminReportSetting (requires ReportSettings.Read.All permission): $_"
         return @{ WasEnabled = $null; Fixed = $false }
     }
 }
