@@ -110,7 +110,7 @@ function Get-UsageReportsViaGraph {
         # endpoint, which returns CSV data including Page View Count and Visited Page Count.
         # Use a temp file because the cmdlet requires -OutFile to save CSV output.
         # Suppress progress to avoid PercentComplete overflow bug in the Graph SDK.
-        $tempFile = [System.IO.Path]::GetTempFileName()
+        $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".csv")
         $previousProgressPreference = $ProgressPreference
         try {
             $ProgressPreference = 'SilentlyContinue'
@@ -374,7 +374,43 @@ try {
     # Export to CSV
     if ($usageData -and $usageData.Count -gt 0) {
         Write-Host "`nExporting data to CSV: $OutputPath" -ForegroundColor Cyan
-        $usageData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
+
+        # Ensure the output directory exists
+        $outputDir = Split-Path -Path $OutputPath -Parent
+        if ($outputDir -and -not (Test-Path -Path $outputDir)) {
+            New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+        }
+
+        # Attempt to export with retry logic in case the file is locked
+        $maxRetries = 3
+        $retryDelay = 2
+        $exported = $false
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $usageData | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
+                $exported = $true
+                break
+            }
+            catch [System.IO.IOException] {
+                if ($attempt -lt $maxRetries) {
+                    Write-Warning "File '$OutputPath' is in use. Retrying in $retryDelay seconds... (attempt $attempt of $maxRetries)"
+                    Start-Sleep -Seconds $retryDelay
+                    $retryDelay *= 2
+                }
+            }
+        }
+
+        if (-not $exported) {
+            # All retries failed — write to a fallback file with a timestamp suffix
+            $fallbackName = [System.IO.Path]::GetFileNameWithoutExtension($OutputPath) +
+                "_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".csv"
+            $fallbackPath = Join-Path -Path (Split-Path -Path $OutputPath -Parent) -ChildPath $fallbackName
+            Write-Warning "Could not write to '$OutputPath' because it is locked by another process (e.g., Excel)."
+            Write-Warning "Saving report to fallback location: $fallbackPath"
+            $usageData | Export-Csv -Path $fallbackPath -NoTypeInformation -Encoding UTF8
+            $OutputPath = $fallbackPath
+        }
+
         Write-Host "Export completed successfully!" -ForegroundColor Green
         Write-Host "Total sites exported: $($usageData.Count)" -ForegroundColor Green
         Write-Host "File location: $OutputPath" -ForegroundColor Green
