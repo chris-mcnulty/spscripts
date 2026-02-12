@@ -20,6 +20,11 @@
     If specified, uses Microsoft Graph API instead of SharePoint Online Management Shell.
     Requires Microsoft.Graph PowerShell modules.
 
+.PARAMETER UseCombined
+    If specified, combines data from both SPO Management Shell and Graph API.
+    Produces a single report with friendly site names/owners from SPO and
+    page view/activity metrics from Graph. Requires both sets of modules.
+
 .EXAMPLE
     .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso"
     Connects to contoso.sharepoint.com and exports usage reports to a timestamped CSV file.
@@ -27,6 +32,10 @@
 .EXAMPLE
     .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -OutputPath "C:\Reports\usage.csv" -UseGraphAPI
     Uses Microsoft Graph API to get usage data and exports to specified path.
+
+.EXAMPLE
+    .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined
+    Combines SPO Management Shell (friendly names) and Graph API (page views) into one report.
 
 .NOTES
     Author: chris-mcnulty/spscripts
@@ -49,7 +58,10 @@ param(
     [string]$AuthMethod = 'Interactive',
 
     [Parameter(Mandatory = $false)]
-    [switch]$UseGraphAPI
+    [switch]$UseGraphAPI,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Combines SPO Management Shell (friendly names) with Graph API (page views/activity) into a single report")]
+    [switch]$UseCombined
 )
 
 # Set error action preference
@@ -222,12 +234,104 @@ function Get-UsageReportsViaSPO {
     }
 }
 
+# Function to combine SPO and Graph data for best-of-both-worlds reporting
+function Get-UsageReportsCombined {
+    param(
+        [string]$TenantName
+    )
+
+    Write-Host "Running combined mode: collecting friendly site info from SPO and activity data from Graph API..." -ForegroundColor Cyan
+
+    # Step 1: Get SPO data (friendly names, titles, owners)
+    $spoData = Get-UsageReportsViaSPO -TenantName $TenantName
+
+    # Step 2: Get Graph data (page views, active files, activity dates)
+    $graphData = Get-UsageReportsViaGraph -TenantName $TenantName
+
+    # Step 3: Build a lookup table of Graph data keyed by SiteUrl
+    $graphLookup = @{}
+    foreach ($graphSite in $graphData) {
+        if (-not [string]::IsNullOrWhiteSpace($graphSite.SiteUrl)) {
+            $graphLookup[$graphSite.SiteUrl.TrimEnd('/')] = $graphSite
+        }
+    }
+
+    Write-Host "Merging $($spoData.Count) SPO sites with $($graphLookup.Count) Graph usage records..." -ForegroundColor Cyan
+
+    # Step 4: Merge SPO and Graph data
+    $combinedData = @()
+    foreach ($spoSite in $spoData) {
+        $url = $spoSite.SiteUrl.TrimEnd('/')
+        $graphSite = $graphLookup[$url]
+
+        $combined = [PSCustomObject]@{
+            SiteUrl                 = $spoSite.SiteUrl
+            Title                   = $spoSite.Title
+            Owner                   = $spoSite.Owner
+            Template                = $spoSite.Template
+            StorageUsedMB           = $spoSite.StorageUsedMB
+            StorageQuotaMB          = $spoSite.StorageQuotaMB
+            StorageUsedPercentage   = $spoSite.StorageUsedPercentage
+            LastContentModifiedDate = $spoSite.LastContentModifiedDate
+            LastActivityDate        = if ($graphSite) { $graphSite.LastActivityDate } else { '' }
+            FileCount               = if ($graphSite) { $graphSite.FileCount } else { '' }
+            ActiveFileCount         = if ($graphSite) { $graphSite.ActiveFileCount } else { '' }
+            PageViewCount           = if ($graphSite) { $graphSite.PageViewCount } else { '' }
+            VisitedPageCount        = if ($graphSite) { $graphSite.VisitedPageCount } else { '' }
+            SharingCapability       = $spoSite.SharingCapability
+            LockState               = $spoSite.LockState
+            IsHubSite               = $spoSite.IsHubSite
+            HubSiteId               = $spoSite.HubSiteId
+            SensitivityLabel        = $spoSite.SensitivityLabel
+            RootWebTemplate         = if ($graphSite) { $graphSite.RootWebTemplate } else { '' }
+            CreatedDate             = $spoSite.CreatedDate
+        }
+        $combinedData += $combined
+
+        # Remove matched entry so we can track unmatched Graph sites
+        if ($graphSite) {
+            $graphLookup.Remove($url)
+        }
+    }
+
+    # Step 5: Append any Graph-only sites not found in SPO (e.g. deleted sites)
+    foreach ($remaining in $graphLookup.Values) {
+        $combined = [PSCustomObject]@{
+            SiteUrl                 = $remaining.SiteUrl
+            Title                   = ''
+            Owner                   = $remaining.OwnerDisplayName
+            Template                = ''
+            StorageUsedMB           = [math]::Round($remaining.StorageUsedInBytes / 1MB, 2)
+            StorageQuotaMB          = [math]::Round($remaining.StorageAllocatedInBytes / 1MB, 2)
+            StorageUsedPercentage   = if ($remaining.StorageAllocatedInBytes -gt 0) { [math]::Round(($remaining.StorageUsedInBytes / $remaining.StorageAllocatedInBytes) * 100, 2) } else { 0 }
+            LastContentModifiedDate = ''
+            LastActivityDate        = $remaining.LastActivityDate
+            FileCount               = $remaining.FileCount
+            ActiveFileCount         = $remaining.ActiveFileCount
+            PageViewCount           = $remaining.PageViewCount
+            VisitedPageCount        = $remaining.VisitedPageCount
+            SharingCapability       = ''
+            LockState               = ''
+            IsHubSite               = ''
+            HubSiteId               = ''
+            SensitivityLabel        = ''
+            RootWebTemplate         = $remaining.RootWebTemplate
+            CreatedDate             = ''
+        }
+        $combinedData += $combined
+    }
+
+    $matchedCount = $combinedData.Count - $graphLookup.Count
+    Write-Host "Combined report: $($combinedData.Count) total sites ($matchedCount matched, $($graphLookup.Count) Graph-only)." -ForegroundColor Green
+    return $combinedData
+}
+
 # Main script execution
 try {
     Write-Host "`n=== SharePoint Site Usage Report Generator ===" -ForegroundColor Cyan
     Write-Host "Tenant: $TenantName" -ForegroundColor Cyan
     Write-Host "Authentication Method: $AuthMethod" -ForegroundColor Cyan
-    Write-Host "Using Graph API: $UseGraphAPI`n" -ForegroundColor Cyan
+    Write-Host "Mode: $(if ($UseCombined) { 'Combined (SPO + Graph)' } elseif ($UseGraphAPI) { 'Graph API' } else { 'SPO Management Shell' })`n" -ForegroundColor Cyan
     
     # Set default output path if not provided
     if ([string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -236,7 +340,17 @@ try {
     }
     
     # Check and install required modules
-    if ($UseGraphAPI) {
+    if ($UseCombined) {
+        Write-Host "Checking for required modules (SPO + Graph)..." -ForegroundColor Cyan
+        $modulesInstalled = Install-RequiredModules -ModuleNames @('Microsoft.Online.SharePoint.PowerShell', 'Microsoft.Graph.Reports', 'Microsoft.Graph.Authentication')
+        if (-not $modulesInstalled) {
+            throw "Failed to install required modules for combined mode."
+        }
+
+        # Get usage data via combined SPO + Graph approach
+        $usageData = Get-UsageReportsCombined -TenantName $TenantName
+    }
+    elseif ($UseGraphAPI) {
         Write-Host "Checking for required Microsoft Graph modules..." -ForegroundColor Cyan
         $modulesInstalled = Install-RequiredModules -ModuleNames @('Microsoft.Graph.Reports', 'Microsoft.Graph.Authentication')
         if (-not $modulesInstalled) {
@@ -266,7 +380,17 @@ try {
         Write-Host "File location: $OutputPath" -ForegroundColor Green
         
         # Display summary statistics
-        if ($UseGraphAPI) {
+        if ($UseCombined) {
+            $totalStorageMB = ($usageData | Measure-Object -Property StorageUsedMB -Sum).Sum
+            $totalFiles = ($usageData | Where-Object { $_.FileCount -ne '' } | Measure-Object -Property FileCount -Sum).Sum
+            $totalPageViews = ($usageData | Where-Object { $_.PageViewCount -ne '' } | Measure-Object -Property PageViewCount -Sum).Sum
+            
+            Write-Host "`n=== Summary Statistics ===" -ForegroundColor Cyan
+            Write-Host "Total Storage Used: $([math]::Round($totalStorageMB / 1024, 2)) GB" -ForegroundColor White
+            Write-Host "Total Files: $totalFiles" -ForegroundColor White
+            Write-Host "Total Page Views (last 7 days): $totalPageViews" -ForegroundColor White
+        }
+        elseif ($UseGraphAPI) {
             $totalStorage = ($usageData | Measure-Object -Property StorageUsedInBytes -Sum).Sum
             $totalFiles = ($usageData | Measure-Object -Property FileCount -Sum).Sum
             $totalPageViews = ($usageData | Measure-Object -Property PageViewCount -Sum).Sum
