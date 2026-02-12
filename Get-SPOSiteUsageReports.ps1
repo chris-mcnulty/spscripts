@@ -121,7 +121,7 @@ function Get-UsageReportsViaGraph {
         }
         
         # Parse the CSV data returned by Graph API
-        $sites = Get-Content -Path $tempFile -Raw | ConvertFrom-Csv
+        $sites = Import-Csv -Path $tempFile
         
         foreach ($site in $sites) {
             $siteInfo = [PSCustomObject]@{
@@ -234,6 +234,19 @@ function Get-UsageReportsViaSPO {
     }
 }
 
+# Helper to normalize a URL so SPO and Graph values match reliably.
+# Decodes percent-encoded characters, strips trailing slashes, query strings,
+# and fragments, and lowercases the result.
+function Normalize-SiteUrl {
+    param([string]$Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
+    $n = [System.Uri]::UnescapeDataString($Url.Trim())
+    $n = $n.TrimEnd('/')
+    $qi = $n.IndexOf('?'); if ($qi -ge 0) { $n = $n.Substring(0, $qi) }
+    $fi = $n.IndexOf('#'); if ($fi -ge 0) { $n = $n.Substring(0, $fi) }
+    return $n.ToLowerInvariant()
+}
+
 # Function to combine SPO and Graph data for best-of-both-worlds reporting
 function Get-UsageReportsCombined {
     param(
@@ -248,11 +261,12 @@ function Get-UsageReportsCombined {
     # Step 2: Get Graph data (page views, active files, activity dates)
     $graphData = Get-UsageReportsViaGraph -TenantName $TenantName
 
-    # Step 3: Build a lookup table of Graph data keyed by SiteUrl
+    # Step 3: Build a lookup table of Graph data keyed by normalized SiteUrl
     $graphLookup = @{}
     foreach ($graphSite in $graphData) {
-        if (-not [string]::IsNullOrWhiteSpace($graphSite.SiteUrl)) {
-            $graphLookup[$graphSite.SiteUrl.TrimEnd('/')] = $graphSite
+        $key = Normalize-SiteUrl -Url $graphSite.SiteUrl
+        if ($key) {
+            $graphLookup[$key] = $graphSite
         }
     }
 
@@ -260,9 +274,10 @@ function Get-UsageReportsCombined {
 
     # Step 4: Merge SPO and Graph data
     $combinedData = @()
+    $matchedCount = 0
     foreach ($spoSite in $spoData) {
-        $url = $spoSite.SiteUrl.TrimEnd('/')
-        $graphSite = $graphLookup[$url]
+        $key = Normalize-SiteUrl -Url $spoSite.SiteUrl
+        $graphSite = if ($key) { $graphLookup[$key] } else { $null }
 
         $combined = [PSCustomObject]@{
             SiteUrl                 = $spoSite.SiteUrl
@@ -290,7 +305,8 @@ function Get-UsageReportsCombined {
 
         # Remove matched entry so we can track unmatched Graph sites
         if ($graphSite) {
-            $graphLookup.Remove($url)
+            $matchedCount++
+            $graphLookup.Remove($key)
         }
     }
 
@@ -321,8 +337,17 @@ function Get-UsageReportsCombined {
         $combinedData += $combined
     }
 
-    $matchedCount = $combinedData.Count - $graphLookup.Count
     Write-Host "Combined report: $($combinedData.Count) total sites ($matchedCount matched, $($graphLookup.Count) Graph-only)." -ForegroundColor Green
+
+    if ($matchedCount -eq 0 -and $graphData.Count -gt 0) {
+        Write-Warning "No SPO sites matched Graph API records by URL. Activity columns (PageViewCount, FileCount, etc.) will be empty."
+        Write-Warning "This can occur when the Microsoft 365 admin center privacy setting 'Conceal user, group, and site names in all reports' is enabled."
+        if ($spoData.Count -gt 0) {
+            Write-Warning "  Sample SPO URL:   $($spoData[0].SiteUrl)"
+            Write-Warning "  Sample Graph URL: $($graphData[0].SiteUrl)"
+        }
+    }
+
     return $combinedData
 }
 
