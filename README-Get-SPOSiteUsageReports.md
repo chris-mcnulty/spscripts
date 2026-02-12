@@ -64,7 +64,7 @@ This method provides additional metrics like page views and active file counts.
 ```powershell
 .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined
 ```
-This mode merges SPO Management Shell data (friendly site names, owners, storage in MB) with Graph API data (page views, active file counts, activity dates) into a single report. Sites are matched by URL first; when Graph report URLs are blank (due to the concealment privacy setting), the script automatically falls back to SiteId-based matching by resolving each SPO URL to its Graph Site ID, then retrieves per-site analytics directly for any remaining unmatched sites.
+This mode merges SPO Management Shell data (friendly site names, owners, storage in MB) with Graph API data (page views, active file counts, activity dates) into a single report. Sites are first matched by URL. When Graph report URLs are blank due to the concealment privacy setting, the script automatically falls back to SiteId-based matching by resolving each SPO URL to its Graph Site ID. Any remaining unmatched sites are enriched with per-site analytics via direct Graph API calls.
 
 ### Specify Output Path
 ```powershell

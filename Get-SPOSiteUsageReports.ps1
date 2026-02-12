@@ -548,21 +548,24 @@ function Get-UsageReportsCombined {
 
     # Step 3b: If URL matching yielded few results but Graph has data with SiteIds,
     # switch to SiteId-based matching by resolving each SPO URL to a Graph SiteId.
-    $useSiteIdMatching = ($urlMatchCount -eq 0 -or ($urlMatchCount -lt ($spoData.Count * 0.1))) -and $graphData.Count -gt 0
+    # Threshold: fall back to SiteId matching when fewer than 10% of SPO sites matched by URL.
+    $siteIdMatchThreshold = 0.1
+    $useSiteIdMatching = ($urlMatchCount -eq 0 -or ($urlMatchCount -lt ($spoData.Count * $siteIdMatchThreshold))) -and $graphData.Count -gt 0
 
     $graphLookup = @{}      # The lookup we will actually use for merging
     $lookupKeyField = 'url' # Track which key type we're using
+    $emptyGuid = '00000000-0000-0000-0000-000000000000'
 
     if ($useSiteIdMatching) {
         # Build Graph lookup keyed by SiteId
         $graphIdLookup = @{}
         foreach ($graphSite in $graphData) {
             $sid = $graphSite.SiteId
-            if ($sid -and $sid -ne '00000000-0000-0000-0000-000000000000') {
-                # Graph SiteId from the report may be a simple GUID; the Sites API
-                # returns compound IDs like "hostname,siteGuid,webGuid".  We key by
-                # the simple GUID portion to maximise matches.
-                $simpleId = ($sid -split ',')[-1]  # last segment is always the site GUID
+            if ($sid -and $sid -ne $emptyGuid) {
+                # Graph SiteId from the report is a simple GUID (e.g. "0251fd42-918b-...").
+                # The Sites API returns compound IDs like "contoso.sharepoint.com,siteGuid,webGuid".
+                # We extract the simple GUID portion to ensure matching works either way.
+                $simpleId = ($sid -split ',')[-1]
                 $graphIdLookup[$simpleId] = $graphSite
             }
         }
@@ -587,7 +590,7 @@ function Get-UsageReportsCombined {
         }
         Write-Progress -Activity "Resolving SPO site IDs via Graph" -Completed
 
-        $idResolved = ($spoSiteIdMap.Values | Where-Object { $_ }).Count
+        $idResolved = ($spoSiteIdMap.Values | Where-Object { -not [string]::IsNullOrEmpty($_) }).Count
         Write-Host "Resolved $idResolved of $resolveTotal SPO sites to Graph SiteIds." -ForegroundColor Green
 
         $graphLookup = $graphIdLookup
@@ -655,7 +658,7 @@ function Get-UsageReportsCombined {
                 if ($resolvedId) { $resolvedId = ($resolvedId -split ',')[-1] }
             }
             if ($resolvedId) {
-                $unmatchedSpoSites += @{ Index = ($combinedData.Count - 1); SiteId = $resolvedId; WebUrl = $spoSite.SiteUrl }
+                $unmatchedSpoSites += [PSCustomObject]@{ Index = ($combinedData.Count - 1); SiteId = $resolvedId; WebUrl = $spoSite.SiteUrl }
             }
         }
     }
