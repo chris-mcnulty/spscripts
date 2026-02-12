@@ -149,7 +149,38 @@ function Get-UsageReportsViaGraph {
         }
         
         Write-Host "Retrieved usage data for $($usageData.Count) sites." -ForegroundColor Green
-        
+
+        # --- Resolve blank URLs via Get-MgSite for sites with valid SiteIds ---
+        # The Graph report may return real SiteIds but blank URLs when the
+        # concealment setting is active.  Get-MgSite is NOT affected by report
+        # concealment and returns real displayName and webUrl from a SiteId.
+        $emptyGuid = '00000000-0000-0000-0000-000000000000'
+        $blankUrlSites = $usageData | Where-Object {
+            [string]::IsNullOrWhiteSpace($_.SiteUrl) -and
+            $_.SiteId -and $_.SiteId -ne $emptyGuid
+        }
+
+        if ($blankUrlSites.Count -gt 0) {
+            Write-Host "Resolving $($blankUrlSites.Count) sites with blank URLs via Get-MgSite..." -ForegroundColor Yellow
+            $resolvedCount = 0
+
+            foreach ($blankSite in $blankUrlSites) {
+                try {
+                    $mgSite = Get-MgSite -SiteId $blankSite.SiteId -Property "id,displayName,webUrl" -ErrorAction Stop
+                    if ($mgSite) {
+                        if ($mgSite.WebUrl)      { $blankSite.SiteUrl = $mgSite.WebUrl }
+                        if ($mgSite.DisplayName)  { $blankSite.OwnerDisplayName = $mgSite.DisplayName }
+                        $resolvedCount++
+                    }
+                }
+                catch {
+                    # Could not resolve this SiteId — leave as-is
+                }
+            }
+
+            Write-Host "Resolved $resolvedCount of $($blankUrlSites.Count) blank-URL sites via Get-MgSite." -ForegroundColor Green
+        }
+
         # --- Obfuscation detection and Sites API fallback ---
         if (Test-GraphDataObfuscated -ReportData $usageData) {
             Write-Warning "Graph report data is obfuscated — site URLs, IDs, and owner names are concealed."
@@ -573,8 +604,13 @@ function Get-UsageReportsCombined {
     # Step 5: Loop through every Graph site, find its SPO match, and build the
     # combined output row.  Graph is the base — every Graph row gets one output
     # row, enriched with SPO metadata when a match is found.
+    #
+    # For unmatched sites with valid SiteIds but blank URLs, we call
+    # Get-MgSite -SiteId to resolve displayName and webUrl directly from the
+    # Graph Sites API — these endpoints are NOT affected by report concealment.
     $combinedData = @()
     $matchedCount = 0
+    $resolvedViaSitesApi = 0
     $total = $graphData.Count
     $counter = 0
 
@@ -583,6 +619,8 @@ function Get-UsageReportsCombined {
     foreach ($graphSite in $graphData) {
         $counter++
         $spoSite = $null
+        $resolvedDisplayName = $null
+        $resolvedWebUrl = $null
 
         # Try 1: match by normalised URL
         $graphKey = Normalize-SiteUrl -Url $graphSite.SiteUrl
@@ -590,18 +628,44 @@ function Get-UsageReportsCombined {
             $spoSite = $spoUrlLookup[$graphKey]
         }
 
-        # Try 2: match by SiteId
+        # Try 2: match by SiteId (via the pre-resolved SPO→SiteId lookup)
         if (-not $spoSite -and $graphSite.SiteId -and $graphSite.SiteId -ne $emptyGuid) {
             $simpleId = ($graphSite.SiteId -split ',')[-1]
             $spoSite = $spoIdLookup[$simpleId]
         }
 
-        # Build combined row: Graph metrics + SPO friendly metadata
+        # Try 3: resolve SiteId directly via Get-MgSite to get displayName & webUrl,
+        # then try matching the resolved webUrl back to SPO for full metadata.
+        if (-not $spoSite -and $graphSite.SiteId -and $graphSite.SiteId -ne $emptyGuid) {
+            try {
+                $mgSite = Get-MgSite -SiteId $graphSite.SiteId -Property "id,displayName,webUrl" -ErrorAction Stop
+                if ($mgSite) {
+                    $resolvedDisplayName = $mgSite.DisplayName
+                    $resolvedWebUrl = $mgSite.WebUrl
+                    $resolvedViaSitesApi++
+
+                    # Try to match the resolved webUrl back to SPO for full metadata
+                    $resolvedKey = Normalize-SiteUrl -Url $resolvedWebUrl
+                    if ($resolvedKey) {
+                        $spoSite = $spoUrlLookup[$resolvedKey]
+                    }
+                }
+            }
+            catch {
+                # Get-MgSite failed for this SiteId — continue silently
+            }
+        }
+
+        # Build combined row: Graph metrics + SPO friendly metadata (or resolved metadata)
+        $siteUrl = if ($spoSite) { $spoSite.SiteUrl } elseif ($resolvedWebUrl) { $resolvedWebUrl } elseif ($graphSite.SiteUrl) { $graphSite.SiteUrl } else { '' }
+        $title = if ($spoSite) { $spoSite.Title } elseif ($resolvedDisplayName) { $resolvedDisplayName } else { '' }
+        $owner = if ($spoSite) { $spoSite.Owner } elseif ($resolvedDisplayName) { $graphSite.OwnerDisplayName } else { $graphSite.OwnerDisplayName }
+
         $combined = [PSCustomObject]@{
-            SiteUrl                 = if ($spoSite) { $spoSite.SiteUrl } elseif ($graphSite.SiteUrl) { $graphSite.SiteUrl } else { '' }
+            SiteUrl                 = $siteUrl
             SiteId                  = $graphSite.SiteId
-            Title                   = if ($spoSite) { $spoSite.Title } else { '' }
-            Owner                   = if ($spoSite) { $spoSite.Owner } else { $graphSite.OwnerDisplayName }
+            Title                   = $title
+            Owner                   = $owner
             OwnerPrincipalName      = $graphSite.OwnerPrincipalName
             Template                = if ($spoSite) { $spoSite.Template } else { '' }
             StorageUsedMB           = if ($spoSite) { $spoSite.StorageUsedMB } else { if ($graphSite.StorageUsedInBytes) { [math]::Round($graphSite.StorageUsedInBytes / 1MB, 2) } else { '' } }
@@ -632,7 +696,7 @@ function Get-UsageReportsCombined {
         }
     }
 
-    Write-Host "Combined report: $total Graph sites, $matchedCount enriched with SPO metadata, $($spoUrlLookup.Count) SPO-only sites not in Graph report." -ForegroundColor Green
+    Write-Host "Combined report: $total Graph sites, $matchedCount enriched with SPO metadata, $resolvedViaSitesApi resolved via Get-MgSite, $($spoUrlLookup.Count) SPO-only sites not in Graph report." -ForegroundColor Green
 
     if ($matchedCount -eq 0 -and $spoData.Count -gt 0 -and $graphData.Count -gt 0) {
         Write-Warning "No Graph sites could be matched to SPO data. Title/Owner columns will be empty."

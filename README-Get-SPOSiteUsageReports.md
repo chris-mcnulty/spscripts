@@ -224,8 +224,9 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 The script now handles this automatically:
 1. **Detects obfuscated data** by checking for zeroed SiteIds, empty URLs, and hashed owner names
 2. **Checks the admin setting** via `(Get-MgAdminReportSetting).DisplayConcealedNames` and **attempts to disable it** via `Update-MgAdminReportSetting -DisplayConcealedNames:$false` (requires `ReportSettings.ReadWrite.All` permission)
-3. **Falls back to the Microsoft Graph Sites API** (`/sites/getAllSites`) which is not affected by the report-privacy setting, providing real site URLs, IDs, and display names
-4. **Retrieves per-site analytics** via `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` to populate page views, file counts, storage, and last activity dates — these endpoints are **not subject to the concealment setting**
+3. **Resolves blank URLs via Get-MgSite** — for any site with a valid SiteId but blank URL, calls `Get-MgSite -SiteId` to retrieve the real `displayName` and `webUrl` (not affected by report concealment)
+4. **Falls back to the Microsoft Graph Sites API** (`/sites/getAllSites`) which is not affected by the report-privacy setting, providing real site URLs, IDs, and display names
+5. **Retrieves per-site analytics** via `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` to populate page views, file counts, storage, and last activity dates — these endpoints are **not subject to the concealment setting**
 
 **Important notes:**
 - After disabling the concealment setting, report data can take **up to 48 hours** to reflect the change
@@ -276,6 +277,10 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **1.4.1** (2026-02-12): Get-MgSite lookup for blank-URL sites
+  - For Graph sites with valid SiteIds but blank URLs, calls `Get-MgSite -SiteId` to resolve displayName and webUrl
+  - Applied in both Graph-only mode (resolves blank URLs before obfuscation check) and combined mode (third matching step after URL and SiteId)
+  - Resolved webUrl is then used to match back to SPO for full metadata in combined mode
 - **1.4.0** (2026-02-12): Reversed combined mode — Graph-first approach
   - Combined mode now starts from Graph report data (authoritative list with SiteIds and all usage metrics)
   - Each Graph site row is enriched with SPO metadata (Title, Owner, Template, etc.) when a match is found
