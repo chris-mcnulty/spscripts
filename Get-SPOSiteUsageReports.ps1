@@ -154,7 +154,7 @@ function Get-UsageReportsViaGraph {
         if (Test-GraphDataObfuscated -ReportData $usageData) {
             Write-Warning "Graph report data is obfuscated — site URLs, IDs, and owner names are concealed."
 
-            if ($privacyResult.WasEnabled -ne $false) {
+            if ($privacyResult.WasEnabled -eq $true) {
                 Write-Warning "The report-privacy setting may have been recently changed. Cached report data can take up to 48 hours to reflect the new setting."
             }
 
@@ -492,7 +492,7 @@ function Get-UsageReportsCombined {
     elseif ($matchedCount -gt 0) {
         # Check whether usage metrics are actually populated (they will be empty
         # when Graph data came from the Sites API fallback due to report obfuscation).
-        $hasUsageMetrics = $combinedData | Where-Object { $_.PageViewCount -ne '' -and $_.PageViewCount -ne $null } | Select-Object -First 1
+        $hasUsageMetrics = $combinedData | Where-Object { -not [string]::IsNullOrEmpty($_.PageViewCount) } | Select-Object -First 1
         if (-not $hasUsageMetrics) {
             Write-Warning "Graph usage metrics (PageViewCount, FileCount, etc.) are empty because the Graph report data was obfuscated."
             Write-Warning "The report contains real site metadata from SPO and the Sites API. Disable the 'Conceal user, group, and site names in all reports' setting and re-run after 48 hours for full usage metrics."
