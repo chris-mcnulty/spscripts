@@ -94,7 +94,8 @@ function Get-UsageReportsViaGraph {
         # Get SharePoint site usage details for the last 7 days
         $usageData = @()
         
-        # Get site usage detail report
+        # Get site usage detail report — this calls the Graph getSharePointSiteUsageDetail
+        # endpoint, which returns CSV data including Page View Count and Visited Page Count.
         $siteUsageDetail = Get-MgReportSharePointSiteUsageDetail -Period D7
         
         # Parse the CSV data returned by Graph API
