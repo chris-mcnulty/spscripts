@@ -92,7 +92,8 @@ function Install-RequiredModules {
 # Function to get usage reports using Microsoft Graph API
 function Get-UsageReportsViaGraph {
     param(
-        [string]$TenantName
+        [string]$TenantName,
+        [switch]$KeepConnection
     )
     
     Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Cyan
@@ -163,10 +164,16 @@ function Get-UsageReportsViaGraph {
         if ($blankUrlSites.Count -gt 0) {
             Write-Host "Resolving $($blankUrlSites.Count) sites with blank URLs via Get-MgSite..." -ForegroundColor Yellow
             $resolvedCount = 0
+            $hostname = "$TenantName.sharepoint.com"
 
             foreach ($blankSite in $blankUrlSites) {
                 try {
-                    $mgSite = Get-MgSite -SiteId $blankSite.SiteId -Property "id,displayName,webUrl" -ErrorAction Stop
+                    # The Graph report returns simple GUIDs as SiteIds, but Get-MgSite
+                    # requires a compound ID: "hostname,siteGuid,webGuid".  For site
+                    # collections the root web GUID typically equals the site GUID.
+                    $siteGuid = $blankSite.SiteId
+                    $compoundId = "$hostname,$siteGuid,$siteGuid"
+                    $mgSite = Get-MgSite -SiteId $compoundId -Property "id,displayName,webUrl" -ErrorAction Stop
                     if ($mgSite) {
                         if ($mgSite.WebUrl)      { $blankSite.SiteUrl = $mgSite.WebUrl }
                         # Store the site display name so it can be used as a fallback
@@ -196,7 +203,7 @@ function Get-UsageReportsViaGraph {
             }
 
             # Fall back to the Sites API which is unaffected by report concealment.
-            $realSites = Get-SiteMetadataViaGraph
+            $realSites = Get-SiteMetadataViaGraph -TenantName $TenantName
 
             if ($realSites.Count -gt 0) {
                 Write-Host "Enriching site metadata with per-site analytics (not affected by report concealment)..." -ForegroundColor Yellow
@@ -241,7 +248,9 @@ function Get-UsageReportsViaGraph {
     }
     finally {
         if ($tempFile) { Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue }
-        Disconnect-MgGraph -ErrorAction SilentlyContinue
+        if (-not $KeepConnection) {
+            Disconnect-MgGraph -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -485,6 +494,8 @@ function Get-PerSiteAnalyticsViaGraph {
 # is not subject to the report-privacy concealment setting, so it always returns
 # real site IDs, URLs, and display names.
 function Get-SiteMetadataViaGraph {
+    param([string]$TenantName)
+
     Write-Host "Retrieving real site metadata from Microsoft Graph Sites API..." -ForegroundColor Cyan
 
     $allSites = @()
@@ -504,8 +515,11 @@ function Get-SiteMetadataViaGraph {
         Write-Warning "getAllSites endpoint failed, trying search-based approach: $_"
     }
 
-    # Fallback: search-based approach (works with delegated Sites.Read.All)
-    $uri = "/v1.0/sites?search=*&`$select=id,displayName,webUrl,createdDateTime&`$top=999"
+    # Fallback: search-based approach (works with delegated Sites.Read.All).
+    # Use the tenant name as the search keyword — matches most SharePoint sites
+    # since they live under the tenant's *.sharepoint.com domain.
+    $searchTerm = if ($TenantName) { $TenantName } else { 'sharepoint' }
+    $uri = "/v1.0/sites?search=$searchTerm&`$select=id,displayName,webUrl,createdDateTime&`$top=999"
     try {
         while ($uri) {
             $response = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
@@ -542,7 +556,9 @@ function Get-UsageReportsCombined {
 
     # Step 1: Get Graph data first — this is the authoritative list of sites
     # with SiteIds and all usage metrics (page views, file counts, etc.).
-    $graphData = Get-UsageReportsViaGraph -TenantName $TenantName
+    # Pass -KeepConnection so the Graph session stays alive for subsequent
+    # SiteId resolution and Get-MgSite calls in this function.
+    $graphData = Get-UsageReportsViaGraph -TenantName $TenantName -KeepConnection
 
     Write-Host "Graph returned $($graphData.Count) site usage records." -ForegroundColor Cyan
 
@@ -642,9 +658,12 @@ function Get-UsageReportsCombined {
 
         # Try 3: resolve SiteId directly via Get-MgSite to get displayName & webUrl,
         # then try matching the resolved webUrl back to SPO for full metadata.
+        # Construct the compound SiteId: "hostname,siteGuid,siteGuid" (for root webs).
         if (-not $spoSite -and $graphSite.SiteId -and $graphSite.SiteId -ne $emptyGuid) {
             try {
-                $mgSite = Get-MgSite -SiteId $graphSite.SiteId -Property "id,displayName,webUrl" -ErrorAction Stop
+                $siteGuid = ($graphSite.SiteId -split ',')[-1]
+                $compoundId = "$TenantName.sharepoint.com,$siteGuid,$siteGuid"
+                $mgSite = Get-MgSite -SiteId $compoundId -Property "id,displayName,webUrl" -ErrorAction Stop
                 if ($mgSite) {
                     $resolvedDisplayName = $mgSite.DisplayName
                     $resolvedWebUrl = $mgSite.WebUrl
@@ -708,6 +727,9 @@ function Get-UsageReportsCombined {
         Write-Warning "No Graph sites could be matched to SPO data. Title/Owner columns will be empty."
         Write-Warning "This can occur when the report-privacy concealment setting was recently changed. Re-run after 48 hours."
     }
+
+    # Disconnect Graph now that all Graph API calls are complete.
+    Disconnect-MgGraph -ErrorAction SilentlyContinue
 
     return $combinedData
 }

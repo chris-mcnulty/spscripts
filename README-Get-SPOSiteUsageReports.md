@@ -277,6 +277,10 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **1.4.2** (2026-02-12): Fix three bugs preventing Graph-to-SPO matching
+  - Fixed `Get-MgSite` to use compound SiteId format (`hostname,siteGuid,siteGuid`) instead of simple GUIDs
+  - Fixed Graph session being disconnected before combined mode could use it (`-KeepConnection` switch)
+  - Fixed sites search fallback using invalid `?search=*` syntax (now uses tenant name as search term)
 - **1.4.1** (2026-02-12): Get-MgSite lookup for blank-URL sites
   - For Graph sites with valid SiteIds but blank URLs, calls `Get-MgSite -SiteId` to resolve displayName and webUrl
   - Applied in both Graph-only mode (resolves blank URLs before obfuscation check) and combined mode (third matching step after URL and SiteId)
