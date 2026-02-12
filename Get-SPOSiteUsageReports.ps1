@@ -96,10 +96,20 @@ function Get-UsageReportsViaGraph {
         
         # Get site usage detail report — this calls the Graph getSharePointSiteUsageDetail
         # endpoint, which returns CSV data including Page View Count and Visited Page Count.
-        $siteUsageDetail = Get-MgReportSharePointSiteUsageDetail -Period D7
+        # Use a temp file because the cmdlet requires -OutFile to save CSV output.
+        # Suppress progress to avoid PercentComplete overflow bug in the Graph SDK.
+        $tempFile = [System.IO.Path]::GetTempFileName()
+        $previousProgressPreference = $ProgressPreference
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            Get-MgReportSharePointSiteUsageDetail -Period D7 -OutFile $tempFile
+        }
+        finally {
+            $ProgressPreference = $previousProgressPreference
+        }
         
         # Parse the CSV data returned by Graph API
-        $sites = $siteUsageDetail | ConvertFrom-Csv
+        $sites = Get-Content -Path $tempFile -Raw | ConvertFrom-Csv
         
         foreach ($site in $sites) {
             $siteInfo = [PSCustomObject]@{
@@ -130,6 +140,7 @@ function Get-UsageReportsViaGraph {
         throw
     }
     finally {
+        if ($tempFile) { Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue }
         Disconnect-MgGraph -ErrorAction SilentlyContinue
     }
 }
