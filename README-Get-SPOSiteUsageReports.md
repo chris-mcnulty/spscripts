@@ -64,7 +64,7 @@ This method provides additional metrics like page views and active file counts.
 ```powershell
 .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined
 ```
-This mode merges SPO Management Shell data (friendly site names, owners, storage in MB) with Graph API data (page views, active file counts, activity dates) into a single report. Sites are matched by URL.
+This mode merges SPO Management Shell data (friendly site names, owners, storage in MB) with Graph API data (page views, active file counts, activity dates) into a single report. Sites are matched by URL first; when Graph report URLs are blank (due to the concealment privacy setting), the script automatically falls back to SiteId-based matching by resolving each SPO URL to its Graph Site ID, then retrieves per-site analytics directly for any remaining unmatched sites.
 
 ### Specify Output Path
 ```powershell
@@ -272,6 +272,11 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **1.3.0** (2026-02-12): SiteId-based matching for combined mode
+  - Combined mode now falls back to SiteId-based matching when Graph report URLs are blank/obfuscated
+  - Each SPO site URL is resolved to its Graph Site ID via `/sites/{hostname}:/{path}`, then matched to Graph report data by SiteId
+  - Unmatched SPO sites are enriched with per-site analytics (page views, file counts) via direct Graph API calls
+  - URL-based matching remains the preferred first pass when Graph URLs are available
 - **1.2.1** (2026-02-12): Use proper Graph SDK cmdlets for report settings
   - Replaced raw `Invoke-MgGraphRequest` calls with `Get-MgAdminReportSetting` and `Update-MgAdminReportSetting` for reliable concealment setting detection and correction
   - Added explicit logging of the actual `DisplayConcealedNames` value so users can confirm the setting
