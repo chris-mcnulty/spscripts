@@ -572,7 +572,7 @@ function Get-UsageReportsCombined {
         Write-Warning "Could not connect to Microsoft Graph: $_"
         Write-Warning "Combined report will contain SPO metadata only (no page views or activity data)."
         # Return SPO-only data with empty Graph columns
-        return Build-SpoOnlyOutput -SpoData $spoData
+        return Build-SPOOnlyOutput -SpoData $spoData
     }
 
     # Validate that we have the expected permissions
@@ -629,7 +629,7 @@ function Get-UsageReportsCombined {
         Write-Warning "Could not retrieve Graph usage report: $_"
         Write-Warning "Combined report will contain SPO metadata only."
         Disconnect-MgGraph -ErrorAction SilentlyContinue
-        return Build-SpoOnlyOutput -SpoData $spoData
+        return Build-SPOOnlyOutput -SpoData $spoData
     }
     finally {
         if ($tempFile) { Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue }
@@ -700,7 +700,9 @@ function Get-UsageReportsCombined {
             }
         }
         catch {
-            # Could not resolve this site — skip silently
+            # Expected failures: 404 (deleted/inaccessible site), 403 (no permission).
+            # Log at verbose level to aid troubleshooting without cluttering output.
+            Write-Verbose "Could not resolve $($spoSite.SiteUrl): $($_.Exception.Message)"
         }
     }
     Write-Progress -Activity "Resolving SPO URLs to Graph SiteIds" -Completed
@@ -776,7 +778,7 @@ function Get-UsageReportsCombined {
 }
 
 # Helper to return SPO-only output with empty Graph columns when Graph is unavailable.
-function Build-SpoOnlyOutput {
+function Build-SPOOnlyOutput {
     param([array]$SpoData)
     $output = @()
     foreach ($spoSite in $SpoData) {
