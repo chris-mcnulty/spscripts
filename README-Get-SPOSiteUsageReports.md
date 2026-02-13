@@ -23,7 +23,7 @@ This PowerShell script enumerates usage reports from all SharePoint sites in a t
 - PowerShell 5.1 or later
 - Microsoft.Graph.Reports module (auto-installed if missing)
 - Microsoft.Graph.Authentication module (auto-installed if missing)
-- Reports.Read.All and Sites.Read.All permissions
+- Reports.Read.All, Sites.Read.All, and ReportSettings.ReadWrite.All permissions
 
 ### For Combined Mode
 - PowerShell 5.1 or later
@@ -64,7 +64,7 @@ This method provides additional metrics like page views and active file counts.
 ```powershell
 .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined
 ```
-This mode merges SPO Management Shell data (friendly site names, owners, storage in MB) with Graph API data (page views, active file counts, activity dates) into a single report. Sites are matched by URL.
+This mode uses SPO as the source of truth for site inventory (Title, URL, Owner — never obfuscated), then attaches Graph usage metrics (page views, file counts, activity dates). SPO URLs are resolved to Graph SiteIds using path-based addressing (`Get-MgSite -SiteId "contoso.sharepoint.com:/sites/SiteName:"`), which avoids `getAllSites` and works with delegated permissions.
 
 ### Specify Output Path
 ```powershell
@@ -114,9 +114,9 @@ The CSV file includes:
 ### Microsoft Graph API Method
 The Graph method retrieves usage data — including page views — as follows:
 
-1. The script calls `Get-MgReportSharePointSiteUsageDetail -Period D7`, which wraps the Microsoft Graph REST API endpoint [`getSharePointSiteUsageDetail`](https://learn.microsoft.com/en-us/graph/api/reportroot-getsharepointsiteusagedetail).
+1. The script calls `Invoke-MgGraphRequest` against the Graph REST endpoint [`getSharePointSiteUsageDetail`](https://learn.microsoft.com/en-us/graph/api/reportroot-getsharepointsiteusagedetail) (bypasses the `Get-MgReportSharePointSiteUsageDetail` cmdlet which has a known PercentComplete overflow bug).
 2. That endpoint returns a CSV report where each row is a site and columns include `Page View Count` and `Visited Page Count`.
-3. The script parses the CSV with `ConvertFrom-Csv` and maps those columns to the output fields listed below.
+3. The script parses the CSV with `Import-Csv` and maps those columns to the output fields listed below.
 
 Page views are tracked server-side by SharePoint and surfaced through this report; there is no separate API call to fetch them.
 
@@ -138,8 +138,8 @@ The CSV file includes:
 - **ReportPeriod**: Report period (e.g., last 7 days)
 
 ### Combined Mode
-The combined mode merges the best of both approaches, using SPO Management Shell for friendly site metadata and Graph API for activity metrics. The CSV file includes:
-- **SiteUrl**: Full URL of the site (from SPO)
+The combined mode uses SPO as the source of truth for site inventory and enriches each site with Graph usage metrics. When the Graph report data is obfuscated (zeroed SiteIds, blank URLs), the script automatically falls back to **per-site Graph analytics** using the compound site IDs resolved from SPO URLs. The CSV file includes:
+- **SiteUrl**: Full URL of the site (from SPO — always reliable)
 - **Title**: Site title (from SPO)
 - **Owner**: Site owner email/username (from SPO)
 - **Template**: Site template type (from SPO)
@@ -158,7 +158,9 @@ The combined mode merges the best of both approaches, using SPO Management Shell
 - **HubSiteId**: Hub site ID if connected to a hub (from SPO)
 - **SensitivityLabel**: Applied sensitivity label (from SPO)
 - **RootWebTemplate**: Site template (from Graph)
+- **IsDeleted**: Whether the site has been deleted (from Graph)
 - **CreatedDate**: Site creation date (from SPO)
+- **ReportRefreshDate**: When the Graph report was generated
 
 ## Examples
 
@@ -214,6 +216,32 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 - Personal sites are excluded by default; modify the script if needed
 - Some sites may be hidden or require special permissions
 
+### Issue: `-Verbose` Produces Garbled CSV or Excessive Output
+**Solution**: The script now automatically suppresses `-Verbose` propagation to internal Graph API calls. If you still see excessive VERBOSE output:
+- This is expected behavior from the Microsoft Graph PowerShell SDK — each HTTP request generates two VERBOSE lines
+- The script isolates Graph calls so they don't inherit `-Verbose`, but some cmdlets may still produce output
+- If the CSV file appears corrupted (contains module manifest properties instead of report data), the script will automatically detect this and fall back to the typed cmdlet
+
+### Issue: Graph API Returns Obfuscated Data (Zeroed SiteIds, Hashed Names)
+**Solution**: The Microsoft 365 admin center has a privacy setting called **"Conceal user, group, and site names in all reports"** that causes the Graph Reports API to return hashed owner names, zeroed-out Site IDs, and empty Site URLs.
+
+The script now handles this automatically:
+1. **Uses SPO as source of truth** — `Get-SPOSite` reliably returns Title, URL, and Owner even when the Graph Reports API is obfuscated
+2. **Robust report download** — `Get-GraphReportCsv` tries `Invoke-MgGraphRequest -OutputFilePath` first, validates the result is real CSV, and falls back to `Get-MgReportSharePointSiteUsageDetail -OutFile` with progress suppression
+3. **Suppresses `-Verbose` noise** — internal Graph API calls (`Get-MgSite`, `Invoke-MgGraphRequest`) are isolated from the `-Verbose` preference to prevent hundreds of VERBOSE lines and potential file corruption
+4. **Resolves SiteIds with visible error logging** — uses `Get-MgSite` path-based addressing and `Invoke-MgGraphRequest` to resolve SPO URLs to Graph compound site IDs; logs first failures as warnings so you can diagnose 403 vs 404 errors
+5. **Falls back to per-site analytics** — when the report join fails (concealed data), automatically falls back to `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` using resolved compound site IDs (not subject to report concealment)
+6. **Checks the admin setting** via `(Get-MgAdminReportSetting).DisplayConcealedNames` and **attempts to disable it** via `Update-MgAdminReportSetting -DisplayConcealedNames:$false`
+7. **Validates output** — checks that SiteUrl and Title are populated in the final output before export, warns if they are blank
+
+**Important notes:**
+- In combined mode (`-UseCombined`), SPO metadata (Title, URL, Owner) is always available regardless of Graph obfuscation
+- When the report join fails, per-site analytics provides PageViewCount, FileCount, StorageUsedBytes, and LastActivityDate
+- `ActiveFileCount` and `VisitedPageCount` are only available from the Reports API (not from per-site analytics)
+- If SiteId resolution fails with 403 errors, you may need to temporarily grant Site Collection Admin rights
+- After disabling the concealment setting, report data can take **up to 48 hours** to reflect the change
+- Grant `ReportSettings.ReadWrite.All` permission for automatic setting correction
+
 ## Permissions Required
 
 ### SharePoint Online Management Shell Method
@@ -224,10 +252,12 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 Application permissions needed:
 - Reports.Read.All
 - Sites.Read.All
+- ReportSettings.ReadWrite.All (for automatic concealment setting detection and correction)
 
 Or delegated permissions:
 - Reports.Read.All
 - Sites.Read.All
+- ReportSettings.ReadWrite.All (optional, but recommended)
 
 ## Best Practices
 
@@ -255,6 +285,51 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **2.2.0** (2026-02-13): Fix `-Verbose` garbled CSV and improve report download robustness
+  - Added `Get-GraphReportCsv` helper that downloads the usage report with validation: tries `Invoke-MgGraphRequest -OutputFilePath` first, validates CSV headers, falls back to `Get-MgReportSharePointSiteUsageDetail -OutFile` with progress suppression
+  - Suppressed `-Verbose` propagation to all internal Graph API calls (`Get-MgSite`, `Invoke-MgGraphRequest`) — prevents hundreds of noisy VERBOSE lines and file corruption during resolution loops
+  - Added diagnostic validation: SPO data sample at load time, URL/Title presence check before export
+  - CSV header validation catches garbled report downloads (Graph manifest properties) before parsing
+- **2.1.0** (2026-02-13): Fix reports cmdlet crash, add per-site analytics fallback, improve error visibility
+  - Replaced `Get-MgReportSharePointSiteUsageDetail` with `Invoke-MgGraphRequest` to fix PercentComplete overflow crash
+  - Added `Resolve-GraphSiteId` helper with dual approach (Get-MgSite + Invoke-MgGraphRequest) and visible error logging
+  - First N resolution failures are shown as warnings (diagnose 403 vs 404 vs format issues)
+  - When report join fails (<20% match rate), automatically falls back to per-site Graph analytics using resolved compound site IDs
+  - Per-site analytics fallback provides PageViewCount, FileCount, StorageUsedBytes, and LastActivityDate even when the report is fully concealed
+- **2.0.0** (2026-02-13): SPO-first combined mode with `Get-MgSite` path-based addressing
+  - Combined mode now uses SPO as source of truth for site inventory (Title, URL, Owner — never obfuscated)
+  - Resolves SPO URLs to Graph SiteIds via `Get-MgSite -SiteId "hostname:/sites/Name:"` — avoids `getAllSites` entirely
+  - Matches SPO sites to Graph usage report by URL first, then by resolved SiteId
+  - Graph connection managed independently from SPO (no session lifecycle issues)
+  - Graceful degradation: returns SPO-only data if Graph connection fails
+  - Validates Graph permissions at start of combined mode
+- **1.4.2** (2026-02-12): Fix three bugs preventing Graph-to-SPO matching
+  - Fixed `Get-MgSite` to use compound SiteId format (`hostname,siteGuid,siteGuid`) instead of simple GUIDs
+  - Fixed Graph session being disconnected before combined mode could use it (`-KeepConnection` switch)
+  - Fixed sites search fallback using invalid `?search=*` syntax (now uses tenant name as search term)
+- **1.4.1** (2026-02-12): Get-MgSite lookup for blank-URL sites
+  - For Graph sites with valid SiteIds but blank URLs, calls `Get-MgSite -SiteId` to resolve displayName and webUrl
+  - Applied in both Graph-only mode (resolves blank URLs before obfuscation check) and combined mode (third matching step after URL and SiteId)
+  - Resolved webUrl is then used to match back to SPO for full metadata in combined mode
+- **1.4.0** (2026-02-12): Reversed combined mode — Graph-first approach
+  - Combined mode now starts from Graph report data (authoritative list with SiteIds and all usage metrics)
+  - Each Graph site row is enriched with SPO metadata (Title, Owner, Template, etc.) when a match is found
+  - Eliminates duplicate rows that occurred when starting from SPO and appending unmatched Graph sites
+  - Matching: URL first, then SiteId (SPO URLs resolved to Graph SiteIds via `/sites/{hostname}:/{path}`)
+- **1.3.0** (2026-02-12): SiteId-based matching for combined mode
+  - Combined mode now falls back to SiteId-based matching when Graph report URLs are blank/obfuscated
+  - Each SPO site URL is resolved to its Graph Site ID via `/sites/{hostname}:/{path}`, then matched to Graph report data by SiteId
+  - Unmatched SPO sites are enriched with per-site analytics (page views, file counts) via direct Graph API calls
+  - URL-based matching remains the preferred first pass when Graph URLs are available
+- **1.2.1** (2026-02-12): Use proper Graph SDK cmdlets for report settings
+  - Replaced raw `Invoke-MgGraphRequest` calls with `Get-MgAdminReportSetting` and `Update-MgAdminReportSetting` for reliable concealment setting detection and correction
+  - Added explicit logging of the actual `DisplayConcealedNames` value so users can confirm the setting
+- **1.2.0** (2026-02-12): Graph API obfuscation handling
+  - Automatic detection of obfuscated Graph report data (zeroed SiteIds, hashed names)
+  - Proactive check and correction of the admin report-privacy concealment setting
+  - Sites API fallback (`/sites/getAllSites`) for real site metadata when reports are obfuscated
+  - Per-site analytics enrichment via `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` to retrieve page views, file counts, storage, and last activity dates even when the report is obfuscated
+  - Improved combined mode diagnostics when partial metrics are unavailable
 - **1.1.0** (2026-02-12): Combined mode
   - New `-UseCombined` switch merges SPO + Graph data into one report
   - Friendly names/owners from SPO with page views/activity from Graph
