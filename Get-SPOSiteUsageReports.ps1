@@ -535,203 +535,270 @@ function Get-SiteMetadataViaGraph {
     }
 }
 
-# Function to combine Graph and SPO data for best-of-both-worlds reporting.
+# Function to combine SPO and Graph data for best-of-both-worlds reporting.
 #
-# Strategy: start from the Graph report (authoritative list with SiteIds and
-# usage metrics for every site), then enrich each row with friendly metadata
-# (Title, Owner, Template, etc.) from SPO.  This avoids the duplicate-row
-# problem that occurred when the old approach started from SPO and appended
-# unmatched Graph sites at the end.
+# Strategy (SPO-first, per ChatGPT analysis):
+#   SPO is the source of truth for site inventory — Get-SPOSite reliably returns
+#   Title, URL, and Owner even when the Graph Reports API is obfuscated.  We then
+#   attach Graph usage metrics (page views, file counts, activity dates) to each
+#   SPO site by matching on URL or by resolving the SPO URL to a Graph site ID
+#   via path-based addressing (/sites/{hostname}:/{path}:).
 #
-# Matching order for each Graph site:
-#   1. URL match — normalised SiteUrl (works when Graph URLs are populated).
-#   2. SiteId match — resolve SPO URLs to Graph compound IDs and compare the
-#      simple GUID portion (works even when Graph URLs are blank/obfuscated).
+#   This avoids getAllSites (requires app-only permission) and doesn't depend on
+#   the Graph report having usable URLs or SiteIds.
+#
+# Matching order for each SPO site → Graph usage row:
+#   1. URL match — normalised SiteUrl from both sides.
+#   2. SiteId match — resolve SPO URL → Graph compound site ID via
+#      Get-MgSite -SiteId "{hostname}:/{path}:", extract the site GUID,
+#      and match it to the Graph report's "Site Id" field.
 function Get-UsageReportsCombined {
     param(
         [string]$TenantName
     )
 
-    Write-Host "Running combined mode: starting from Graph usage data, enriching with SPO site details..." -ForegroundColor Cyan
+    Write-Host "Running combined mode (SPO-first): SPO for site inventory, Graph for usage metrics..." -ForegroundColor Cyan
 
-    # Step 1: Get Graph data first — this is the authoritative list of sites
-    # with SiteIds and all usage metrics (page views, file counts, etc.).
-    # Pass -KeepConnection so the Graph session stays alive for subsequent
-    # SiteId resolution and Get-MgSite calls in this function.
-    $graphData = Get-UsageReportsViaGraph -TenantName $TenantName -KeepConnection
-
-    Write-Host "Graph returned $($graphData.Count) site usage records." -ForegroundColor Cyan
-
-    # Step 2: Get SPO data (friendly names, titles, owners, storage in MB).
+    # ── Step 1: Get SPO data — source of truth for site inventory ──
     $spoData = Get-UsageReportsViaSPO -TenantName $TenantName
+    Write-Host "SPO returned $($spoData.Count) site records (Title, URL, Owner)." -ForegroundColor Cyan
 
-    Write-Host "SPO returned $($spoData.Count) site records." -ForegroundColor Cyan
-
-    # Step 3: Build SPO lookup by normalised URL.
-    $spoUrlLookup = @{}
-    foreach ($spoSite in $spoData) {
-        $key = Normalize-SiteUrl -Url $spoSite.SiteUrl
-        if ($key) { $spoUrlLookup[$key] = $spoSite }
+    # ── Step 2: Connect to Graph and pull the usage report ──
+    Write-Host "Connecting to Microsoft Graph for usage metrics..." -ForegroundColor Cyan
+    try {
+        Connect-MgGraph -Scopes "Reports.Read.All", "Sites.Read.All", "ReportSettings.ReadWrite.All" -NoWelcome
+    }
+    catch {
+        Write-Warning "Could not connect to Microsoft Graph: $_"
+        Write-Warning "Combined report will contain SPO metadata only (no page views or activity data)."
+        # Return SPO-only data with empty Graph columns
+        return Build-SpoOnlyOutput -SpoData $spoData
     }
 
-    # Step 4: Build SPO lookup by SiteId (resolve each SPO URL to its Graph
-    # SiteId via the /sites/{hostname}:/{path} endpoint).  This is needed when
-    # Graph report URLs are blank due to the concealment setting.
-    $spoIdLookup = @{}
+    # Validate that we have the expected permissions
+    try {
+        $context = Get-MgContext
+        if ($context) {
+            Write-Host "Graph context: Account=$($context.Account), Scopes=$($context.Scopes -join ', ')" -ForegroundColor Cyan
+        }
+    }
+    catch {
+        # Non-fatal — just skip the permission dump
+    }
+
+    # Proactively check/fix the report-privacy concealment setting
+    $privacyResult = Resolve-GraphReportPrivacy
+
+    # Pull the usage report
+    Write-Host "Retrieving SharePoint site usage report from Microsoft Graph..." -ForegroundColor Cyan
+    $graphData = @()
+    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".csv")
+    try {
+        $previousProgressPreference = $ProgressPreference
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            Get-MgReportSharePointSiteUsageDetail -Period D7 -OutFile $tempFile
+        }
+        finally {
+            $ProgressPreference = $previousProgressPreference
+        }
+
+        $sites = Import-Csv -Path $tempFile
+        foreach ($site in $sites) {
+            $graphData += [PSCustomObject]@{
+                SiteUrl              = $site.'Site URL'
+                SiteId               = $site.'Site Id'
+                OwnerDisplayName     = $site.'Owner Display Name'
+                OwnerPrincipalName   = $site.'Owner Principal Name'
+                IsDeleted            = $site.'Is Deleted'
+                LastActivityDate     = $site.'Last Activity Date'
+                FileCount            = $site.'File Count'
+                ActiveFileCount      = $site.'Active File Count'
+                PageViewCount        = $site.'Page View Count'
+                VisitedPageCount     = $site.'Visited Page Count'
+                StorageUsedInBytes   = $site.'Storage Used (Byte)'
+                StorageAllocatedInBytes = $site.'Storage Allocated (Byte)'
+                RootWebTemplate      = $site.'Root Web Template'
+                ReportRefreshDate    = $site.'Report Refresh Date'
+                ReportPeriod         = $site.'Report Period'
+            }
+        }
+        Write-Host "Graph returned $($graphData.Count) site usage records." -ForegroundColor Green
+    }
+    catch {
+        Write-Warning "Could not retrieve Graph usage report: $_"
+        Write-Warning "Combined report will contain SPO metadata only."
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
+        return Build-SpoOnlyOutput -SpoData $spoData
+    }
+    finally {
+        if ($tempFile) { Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue }
+    }
+
+    # ── Step 3: Build Graph lookups ──
     $emptyGuid = '00000000-0000-0000-0000-000000000000'
 
-    # Check whether we even have usable Graph URLs for URL matching
-    $graphUrlCount = ($graphData | Where-Object { -not [string]::IsNullOrWhiteSpace($_.SiteUrl) }).Count
-    $needSiteIdLookup = $graphUrlCount -lt ($graphData.Count * 0.5)
-
-    if ($needSiteIdLookup -and $spoData.Count -gt 0) {
-        Write-Host "Graph report URLs are mostly blank. Resolving SPO URLs to Graph SiteIds for matching..." -ForegroundColor Yellow
-        $resolveCounter = 0
-        $resolveTotal = $spoData.Count
-
-        foreach ($spoSite in $spoData) {
-            $resolveCounter++
-            Write-Progress -Activity "Resolving SPO site IDs via Graph" `
-                -Status "Processing $resolveCounter of $resolveTotal" `
-                -PercentComplete (($resolveCounter / $resolveTotal) * 100)
-
-            try {
-                $spoUrl = [System.Uri]$spoSite.SiteUrl
-                $hostname = $spoUrl.Host
-                $path = $spoUrl.AbsolutePath.TrimEnd('/')
-                $graphUri = if ($path -and $path -ne '/') {
-                    "/v1.0/sites/${hostname}:${path}?`$select=id"
-                } else {
-                    "/v1.0/sites/${hostname}?`$select=id"
-                }
-                $resp = Invoke-MgGraphRequest -Method GET -Uri $graphUri -ErrorAction Stop
-                if ($resp.id) {
-                    # Extract the simple GUID from the compound id (hostname,siteGuid,webGuid)
-                    $parts = $resp.id -split ','
-                    if ($parts.Count -ge 2) {
-                        $spoIdLookup[$parts[1]] = $spoSite
-                    }
-                    # Also key by the last segment for safety
-                    $spoIdLookup[$parts[-1]] = $spoSite
-                }
-            }
-            catch {
-                # Could not resolve this SPO site — skip silently
-            }
-        }
-        Write-Progress -Activity "Resolving SPO site IDs via Graph" -Completed
-        Write-Host "Resolved $($spoIdLookup.Count) SPO site-to-SiteId mappings." -ForegroundColor Green
+    # 3a: Lookup by normalised URL (works when Graph report URLs are populated)
+    $graphUrlLookup = @{}
+    foreach ($g in $graphData) {
+        $key = Normalize-SiteUrl -Url $g.SiteUrl
+        if ($key) { $graphUrlLookup[$key] = $g }
     }
 
-    # Step 5: Loop through every Graph site, find its SPO match, and build the
-    # combined output row.  Graph is the base — every Graph row gets one output
-    # row, enriched with SPO metadata when a match is found.
-    #
-    # For unmatched sites with valid SiteIds but blank URLs, we call
-    # Get-MgSite -SiteId to resolve displayName and webUrl directly from the
-    # Graph Sites API — these endpoints are NOT affected by report concealment.
+    # 3b: Lookup by simple SiteId GUID (works even when Graph URLs are blank)
+    $graphIdLookup = @{}
+    foreach ($g in $graphData) {
+        if ($g.SiteId -and $g.SiteId -ne $emptyGuid) {
+            $simpleId = ($g.SiteId -split ',')[-1]  # handles both simple and compound IDs
+            $graphIdLookup[$simpleId] = $g
+        }
+    }
+
+    $graphUrlCount = $graphUrlLookup.Count
+    Write-Host "Graph lookup: $graphUrlCount by URL, $($graphIdLookup.Count) by SiteId." -ForegroundColor Cyan
+
+    # ── Step 4: For each SPO site, resolve its Graph SiteId via path-based
+    #    addressing.  This is the key trick: /sites/{hostname}:/{path}: returns
+    #    the compound site ID without needing getAllSites or app-only permissions.
+    Write-Host "Resolving SPO URLs to Graph SiteIds via path-based addressing..." -ForegroundColor Cyan
+    $spoSiteIdMap = @{}   # SPO URL → simple site GUID from Graph
+    $resolveCounter = 0
+    $resolveTotal = $spoData.Count
+
+    foreach ($spoSite in $spoData) {
+        $resolveCounter++
+        if ($resolveCounter % 10 -eq 0 -or $resolveCounter -eq $resolveTotal) {
+            Write-Progress -Activity "Resolving SPO URLs to Graph SiteIds" `
+                -Status "$resolveCounter of $resolveTotal" `
+                -PercentComplete (($resolveCounter / $resolveTotal) * 100)
+        }
+
+        try {
+            $spoUrl = [System.Uri]$spoSite.SiteUrl
+            $hostname = $spoUrl.Host
+            $path = $spoUrl.AbsolutePath.TrimEnd('/')
+            # Path-based site addressing: /sites/{hostname}:/{path}:
+            $graphUri = if ($path -and $path -ne '/') {
+                "/v1.0/sites/${hostname}:${path}:?`$select=id"
+            } else {
+                "/v1.0/sites/${hostname}?`$select=id"
+            }
+            $resp = Invoke-MgGraphRequest -Method GET -Uri $graphUri -ErrorAction Stop
+            if ($resp.id) {
+                # Compound ID = "hostname,siteGuid,webGuid" — extract siteGuid
+                $parts = $resp.id -split ','
+                if ($parts.Count -ge 2) {
+                    $spoSiteIdMap[$spoSite.SiteUrl] = $parts[1]
+                }
+            }
+        }
+        catch {
+            # Could not resolve — skip silently
+        }
+    }
+    Write-Progress -Activity "Resolving SPO URLs to Graph SiteIds" -Completed
+    Write-Host "Resolved $($spoSiteIdMap.Count) of $resolveTotal SPO sites to Graph SiteIds." -ForegroundColor Green
+
+    # ── Step 5: Merge — SPO is the base, Graph provides usage metrics ──
     $combinedData = @()
-    $matchedCount = 0
-    $resolvedViaSitesApi = 0
-    $total = $graphData.Count
-    $counter = 0
+    $matchedByUrl = 0
+    $matchedById = 0
 
-    Write-Host "Merging $total Graph sites with SPO metadata..." -ForegroundColor Cyan
+    Write-Host "Merging $($spoData.Count) SPO sites with Graph usage data..." -ForegroundColor Cyan
 
-    foreach ($graphSite in $graphData) {
-        $counter++
-        $spoSite = $null
-        $resolvedDisplayName = $null
-        $resolvedWebUrl = $null
+    foreach ($spoSite in $spoData) {
+        $graphSite = $null
 
         # Try 1: match by normalised URL
-        $graphKey = Normalize-SiteUrl -Url $graphSite.SiteUrl
-        if ($graphKey) {
-            $spoSite = $spoUrlLookup[$graphKey]
+        $spoKey = Normalize-SiteUrl -Url $spoSite.SiteUrl
+        if ($spoKey -and $graphUrlLookup.ContainsKey($spoKey)) {
+            $graphSite = $graphUrlLookup[$spoKey]
+            $matchedByUrl++
         }
 
-        # Try 2: match by SiteId (via the pre-resolved SPO→SiteId lookup)
-        if (-not $spoSite -and $graphSite.SiteId -and $graphSite.SiteId -ne $emptyGuid) {
-            $simpleId = ($graphSite.SiteId -split ',')[-1]
-            $spoSite = $spoIdLookup[$simpleId]
-        }
-
-        # Try 3: resolve SiteId directly via Get-MgSite to get displayName & webUrl,
-        # then try matching the resolved webUrl back to SPO for full metadata.
-        # Graph report SiteIds are simple GUIDs; construct the compound ID that
-        # Get-MgSite requires: "hostname,siteGuid,siteGuid" (root web = site GUID).
-        if (-not $spoSite -and $graphSite.SiteId -and $graphSite.SiteId -ne $emptyGuid) {
-            try {
-                $compoundId = "$TenantName.sharepoint.com,$($graphSite.SiteId),$($graphSite.SiteId)"
-                $mgSite = Get-MgSite -SiteId $compoundId -Property "id,displayName,webUrl" -ErrorAction Stop
-                if ($mgSite) {
-                    $resolvedDisplayName = $mgSite.DisplayName
-                    $resolvedWebUrl = $mgSite.WebUrl
-                    $resolvedViaSitesApi++
-
-                    # Try to match the resolved webUrl back to SPO for full metadata
-                    $resolvedKey = Normalize-SiteUrl -Url $resolvedWebUrl
-                    if ($resolvedKey) {
-                        $spoSite = $spoUrlLookup[$resolvedKey]
-                    }
-                }
-            }
-            catch {
-                # Get-MgSite failed for this SiteId — continue silently
+        # Try 2: match by resolved SiteId
+        if (-not $graphSite) {
+            $resolvedId = $spoSiteIdMap[$spoSite.SiteUrl]
+            if ($resolvedId -and $graphIdLookup.ContainsKey($resolvedId)) {
+                $graphSite = $graphIdLookup[$resolvedId]
+                $matchedById++
             }
         }
 
-        # Build combined row: Graph metrics + SPO friendly metadata (or resolved metadata)
-        $siteUrl = if ($spoSite) { $spoSite.SiteUrl } elseif ($resolvedWebUrl) { $resolvedWebUrl } elseif ($graphSite.SiteUrl) { $graphSite.SiteUrl } else { '' }
-        $title = if ($spoSite) { $spoSite.Title } elseif ($resolvedDisplayName) { $resolvedDisplayName } else { '' }
-        $owner = if ($spoSite) { $spoSite.Owner } else { $graphSite.OwnerDisplayName }
-
+        # Build combined row: SPO metadata + Graph usage metrics
         $combined = [PSCustomObject]@{
-            SiteUrl                 = $siteUrl
-            SiteId                  = $graphSite.SiteId
-            Title                   = $title
-            Owner                   = $owner
-            OwnerPrincipalName      = $graphSite.OwnerPrincipalName
-            Template                = if ($spoSite) { $spoSite.Template } else { '' }
-            StorageUsedMB           = if ($spoSite) { $spoSite.StorageUsedMB } else { if ($graphSite.StorageUsedInBytes) { [math]::Round($graphSite.StorageUsedInBytes / 1MB, 2) } else { '' } }
-            StorageQuotaMB          = if ($spoSite) { $spoSite.StorageQuotaMB } else { if ($graphSite.StorageAllocatedInBytes) { [math]::Round($graphSite.StorageAllocatedInBytes / 1MB, 2) } else { '' } }
-            StorageUsedPercentage   = if ($spoSite) { $spoSite.StorageUsedPercentage } else { '' }
-            LastContentModifiedDate = if ($spoSite) { $spoSite.LastContentModifiedDate } else { '' }
-            LastActivityDate        = $graphSite.LastActivityDate
-            FileCount               = $graphSite.FileCount
-            ActiveFileCount         = $graphSite.ActiveFileCount
-            PageViewCount           = $graphSite.PageViewCount
-            VisitedPageCount        = $graphSite.VisitedPageCount
-            SharingCapability       = if ($spoSite) { $spoSite.SharingCapability } else { '' }
-            LockState               = if ($spoSite) { $spoSite.LockState } else { '' }
-            IsHubSite               = if ($spoSite) { $spoSite.IsHubSite } else { '' }
-            HubSiteId               = if ($spoSite) { $spoSite.HubSiteId } else { '' }
-            SensitivityLabel        = if ($spoSite) { $spoSite.SensitivityLabel } else { '' }
-            RootWebTemplate         = $graphSite.RootWebTemplate
-            IsDeleted               = $graphSite.IsDeleted
-            CreatedDate             = if ($spoSite) { $spoSite.CreatedDate } else { '' }
-            ReportRefreshDate       = $graphSite.ReportRefreshDate
+            SiteUrl                 = $spoSite.SiteUrl
+            Title                   = $spoSite.Title
+            Owner                   = $spoSite.Owner
+            Template                = $spoSite.Template
+            StorageUsedMB           = $spoSite.StorageUsedMB
+            StorageQuotaMB          = $spoSite.StorageQuotaMB
+            StorageUsedPercentage   = $spoSite.StorageUsedPercentage
+            LastContentModifiedDate = $spoSite.LastContentModifiedDate
+            LastActivityDate        = if ($graphSite) { $graphSite.LastActivityDate } else { '' }
+            FileCount               = if ($graphSite) { $graphSite.FileCount } else { '' }
+            ActiveFileCount         = if ($graphSite) { $graphSite.ActiveFileCount } else { '' }
+            PageViewCount           = if ($graphSite) { $graphSite.PageViewCount } else { '' }
+            VisitedPageCount        = if ($graphSite) { $graphSite.VisitedPageCount } else { '' }
+            SharingCapability       = $spoSite.SharingCapability
+            LockState               = $spoSite.LockState
+            IsHubSite               = $spoSite.IsHubSite
+            HubSiteId               = $spoSite.HubSiteId
+            SensitivityLabel        = $spoSite.SensitivityLabel
+            RootWebTemplate         = if ($graphSite) { $graphSite.RootWebTemplate } else { '' }
+            IsDeleted               = if ($graphSite) { $graphSite.IsDeleted } else { '' }
+            CreatedDate             = $spoSite.CreatedDate
+            ReportRefreshDate       = if ($graphSite) { $graphSite.ReportRefreshDate } else { '' }
         }
         $combinedData += $combined
-
-        if ($spoSite) {
-            $matchedCount++
-            # Remove from URL lookup so we can track SPO-only sites later
-            if ($graphKey) { $spoUrlLookup.Remove($graphKey) }
-        }
     }
 
-    Write-Host "Combined report: $total Graph sites, $matchedCount enriched with SPO metadata, $resolvedViaSitesApi resolved via Get-MgSite, $($spoUrlLookup.Count) SPO-only sites not in Graph report." -ForegroundColor Green
+    $totalMatched = $matchedByUrl + $matchedById
+    Write-Host "Combined report: $($combinedData.Count) sites — $matchedByUrl matched by URL, $matchedById matched by SiteId, $($spoData.Count - $totalMatched) SPO-only (no Graph usage data)." -ForegroundColor Green
 
-    if ($matchedCount -eq 0 -and $spoData.Count -gt 0 -and $graphData.Count -gt 0) {
-        Write-Warning "No Graph sites could be matched to SPO data. Title/Owner columns will be empty."
-        Write-Warning "This can occur when the report-privacy concealment setting was recently changed. Re-run after 48 hours."
+    if ($totalMatched -eq 0 -and $graphData.Count -gt 0) {
+        Write-Warning "No SPO sites matched Graph usage data. Activity columns will be empty."
+        Write-Warning "This can occur when the M365 report concealment setting is enabled and Graph data is fully obfuscated."
+        Write-Warning "The script resolved $($spoSiteIdMap.Count) SPO URLs to Graph SiteIds but the Graph report's SiteIds may be zeroed out."
     }
 
-    # Disconnect Graph now that all Graph API calls are complete.
+    # Disconnect Graph
     Disconnect-MgGraph -ErrorAction SilentlyContinue
 
     return $combinedData
+}
+
+# Helper to return SPO-only output with empty Graph columns when Graph is unavailable.
+function Build-SpoOnlyOutput {
+    param([array]$SpoData)
+    $output = @()
+    foreach ($spoSite in $SpoData) {
+        $output += [PSCustomObject]@{
+            SiteUrl                 = $spoSite.SiteUrl
+            Title                   = $spoSite.Title
+            Owner                   = $spoSite.Owner
+            Template                = $spoSite.Template
+            StorageUsedMB           = $spoSite.StorageUsedMB
+            StorageQuotaMB          = $spoSite.StorageQuotaMB
+            StorageUsedPercentage   = $spoSite.StorageUsedPercentage
+            LastContentModifiedDate = $spoSite.LastContentModifiedDate
+            LastActivityDate        = ''
+            FileCount               = ''
+            ActiveFileCount         = ''
+            PageViewCount           = ''
+            VisitedPageCount        = ''
+            SharingCapability       = $spoSite.SharingCapability
+            LockState               = $spoSite.LockState
+            IsHubSite               = $spoSite.IsHubSite
+            HubSiteId               = $spoSite.HubSiteId
+            SensitivityLabel        = $spoSite.SensitivityLabel
+            RootWebTemplate         = ''
+            IsDeleted               = ''
+            CreatedDate             = $spoSite.CreatedDate
+            ReportRefreshDate       = ''
+        }
+    }
+    return $output
 }
 
 # Main script execution
