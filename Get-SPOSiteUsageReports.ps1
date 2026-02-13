@@ -111,19 +111,14 @@ function Get-UsageReportsViaGraph {
         # Get SharePoint site usage details for the last 7 days
         $usageData = @()
         
-        # Get site usage detail report — this calls the Graph getSharePointSiteUsageDetail
-        # endpoint, which returns CSV data including Page View Count and Visited Page Count.
-        # Use a temp file because the cmdlet requires -OutFile to save CSV output.
-        # Suppress progress to avoid PercentComplete overflow bug in the Graph SDK.
+        # Get site usage detail report — call the Graph REST endpoint directly
+        # instead of the Get-MgReportSharePointSiteUsageDetail cmdlet, which has
+        # a known PercentComplete overflow bug (int32 overflow in Write-Progress).
+        # Invoke-MgGraphRequest -OutputFilePath bypasses the cmdlet wrapper entirely.
         $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".csv")
-        $previousProgressPreference = $ProgressPreference
-        try {
-            $ProgressPreference = 'SilentlyContinue'
-            Get-MgReportSharePointSiteUsageDetail -Period D7 -OutFile $tempFile
-        }
-        finally {
-            $ProgressPreference = $previousProgressPreference
-        }
+        Invoke-MgGraphRequest -Method GET `
+            -Uri "/v1.0/reports/getSharePointSiteUsageDetail(period='D7')" `
+            -OutputFilePath $tempFile
         
         # Parse the CSV data returned by Graph API
         $sites = Import-Csv -Path $tempFile
@@ -342,6 +337,71 @@ function Normalize-SiteUrl {
     $qi = $n.IndexOf('?'); if ($qi -ge 0) { $n = $n.Substring(0, $qi) }
     $fi = $n.IndexOf('#'); if ($fi -ge 0) { $n = $n.Substring(0, $fi) }
     return $n.ToLowerInvariant()
+}
+
+# Resolve a SharePoint site URL to a Graph compound site ID.
+#
+# Tries two approaches in order:
+#   1. Graph path-based addressing:
+#      Get-MgSite -SiteId "hostname:/sites/Name:" → returns compound Id
+#   2. Direct Graph REST:
+#      Invoke-MgGraphRequest /v1.0/sites/{hostname}:/{path}: → returns id
+#
+# Returns $null if both fail.  The caller should log the failure.
+function Resolve-GraphSiteId {
+    param(
+        [Parameter(Mandatory)][string]$SiteUrl
+    )
+
+    $u = [System.Uri]$SiteUrl
+    $hostname = $u.Host
+    $path = $u.AbsolutePath.TrimEnd('/')
+
+    # Approach 1: Get-MgSite with path-based addressing
+    try {
+        $pathBasedId = if ($path -and $path -ne '/') {
+            "${hostname}:${path}:"
+        } else {
+            $hostname
+        }
+        $mgSite = Get-MgSite -SiteId $pathBasedId -Property "id" -ErrorAction Stop
+        if ($mgSite -and $mgSite.Id) {
+            $parts = $mgSite.Id -split ','
+            if ($parts.Count -ge 2) {
+                return [PSCustomObject]@{
+                    CompoundId = $mgSite.Id
+                    SiteGuid   = $parts[1]
+                }
+            }
+        }
+    }
+    catch {
+        # Will try fallback approach
+    }
+
+    # Approach 2: Invoke-MgGraphRequest directly (sometimes more reliable)
+    try {
+        $graphUri = if ($path -and $path -ne '/') {
+            "/v1.0/sites/${hostname}:${path}:?`$select=id"
+        } else {
+            "/v1.0/sites/${hostname}?`$select=id"
+        }
+        $resp = Invoke-MgGraphRequest -Method GET -Uri $graphUri -ErrorAction Stop
+        if ($resp.id) {
+            $parts = $resp.id -split ','
+            if ($parts.Count -ge 2) {
+                return [PSCustomObject]@{
+                    CompoundId = $resp.id
+                    SiteGuid   = $parts[1]
+                }
+            }
+        }
+    }
+    catch {
+        # Both approaches failed
+    }
+
+    return $null
 }
 
 # Detect whether Graph report data has been obfuscated by the M365 privacy
@@ -589,19 +649,15 @@ function Get-UsageReportsCombined {
     # Proactively check/fix the report-privacy concealment setting
     $privacyResult = Resolve-GraphReportPrivacy
 
-    # Pull the usage report
+    # Pull the usage report — use Invoke-MgGraphRequest directly to avoid the
+    # PercentComplete overflow bug in Get-MgReportSharePointSiteUsageDetail.
     Write-Host "Retrieving SharePoint site usage report from Microsoft Graph..." -ForegroundColor Cyan
     $graphData = @()
     $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".csv")
     try {
-        $previousProgressPreference = $ProgressPreference
-        try {
-            $ProgressPreference = 'SilentlyContinue'
-            Get-MgReportSharePointSiteUsageDetail -Period D7 -OutFile $tempFile
-        }
-        finally {
-            $ProgressPreference = $previousProgressPreference
-        }
+        Invoke-MgGraphRequest -Method GET `
+            -Uri "/v1.0/reports/getSharePointSiteUsageDetail(period='D7')" `
+            -OutputFilePath $tempFile
 
         $sites = Import-Csv -Path $tempFile
         foreach ($site in $sites) {
@@ -657,16 +713,16 @@ function Get-UsageReportsCombined {
     $graphUrlCount = $graphUrlLookup.Count
     Write-Host "Graph lookup: $graphUrlCount by URL, $($graphIdLookup.Count) by SiteId." -ForegroundColor Cyan
 
-    # ── Step 4: For each SPO site, resolve its Graph SiteId via Get-MgSite
-    #    with path-based addressing.  This is the recommended approach:
-    #      Get-MgSite -SiteId "contoso.sharepoint.com:/sites/SiteName:"
-    #    returns Id, WebUrl, DisplayName — no need for getAllSites or app-only
-    #    permissions.  We extract the site GUID from the compound Id and use it
-    #    to match against the Graph report's "Site Id" field.
-    Write-Host "Resolving SPO URLs to Graph SiteIds via Get-MgSite path-based addressing..." -ForegroundColor Cyan
-    $spoSiteIdMap = @{}   # SPO URL → simple site GUID from Graph
+    # ── Step 4: Resolve SPO URLs to Graph SiteIds ──
+    # Try two approaches: Get-MgSite path-based addressing and Invoke-MgGraphRequest.
+    # Log the first few failures as warnings so the user can diagnose (403 vs 404).
+    Write-Host "Resolving SPO URLs to Graph SiteIds..." -ForegroundColor Cyan
+    $spoSiteIdMap = @{}    # SPO URL → simple site GUID from Graph
+    $spoCompoundMap = @{}  # SPO URL → full compound Id (for per-site analytics fallback)
     $resolveCounter = 0
     $resolveTotal = $spoData.Count
+    $failureCount = 0
+    $maxWarnings = 5  # Show first N failures as warnings for diagnostics
 
     foreach ($spoSite in $spoData) {
         $resolveCounter++
@@ -676,44 +732,31 @@ function Get-UsageReportsCombined {
                 -PercentComplete (($resolveCounter / $resolveTotal) * 100)
         }
 
-        try {
-            $spoUrl = [System.Uri]$spoSite.SiteUrl
-            $hostname = $spoUrl.Host
-            $path = $spoUrl.AbsolutePath.TrimEnd('/')
-
-            # Build the path-based site identifier:
-            #   "contoso.sharepoint.com:/sites/SiteName:"
-            # For root sites (no path), just use the hostname.
-            $pathBasedId = if ($path -and $path -ne '/') {
-                "${hostname}:${path}:"
-            } else {
-                $hostname
-            }
-
-            $mgSite = Get-MgSite -SiteId $pathBasedId -Property "id" -ErrorAction Stop
-            if ($mgSite -and $mgSite.Id) {
-                # Compound Id = "hostname,siteGuid,webGuid" — extract siteGuid
-                $parts = $mgSite.Id -split ','
-                if ($parts.Count -ge 2) {
-                    $spoSiteIdMap[$spoSite.SiteUrl] = $parts[1]
-                }
-            }
+        $resolved = Resolve-GraphSiteId -SiteUrl $spoSite.SiteUrl
+        if ($resolved) {
+            $spoSiteIdMap[$spoSite.SiteUrl] = $resolved.SiteGuid
+            $spoCompoundMap[$spoSite.SiteUrl] = $resolved.CompoundId
         }
-        catch {
-            # Expected failures: 404 (deleted/inaccessible site), 403 (no permission).
-            # Log at verbose level to aid troubleshooting without cluttering output.
-            Write-Verbose "Could not resolve $($spoSite.SiteUrl): $($_.Exception.Message)"
+        else {
+            $failureCount++
+            if ($failureCount -le $maxWarnings) {
+                Write-Warning "Could not resolve Graph SiteId for: $($spoSite.SiteUrl)"
+            }
         }
     }
     Write-Progress -Activity "Resolving SPO URLs to Graph SiteIds" -Completed
-    Write-Host "Resolved $($spoSiteIdMap.Count) of $resolveTotal SPO sites to Graph SiteIds." -ForegroundColor Green
 
-    # ── Step 5: Merge — SPO is the base, Graph provides usage metrics ──
-    $combinedData = @()
+    if ($failureCount -gt $maxWarnings) {
+        Write-Warning "... and $($failureCount - $maxWarnings) more sites could not be resolved. Run with -Verbose for details."
+    }
+    Write-Host "Resolved $($spoSiteIdMap.Count) of $resolveTotal SPO sites to Graph SiteIds ($failureCount failed)." -ForegroundColor Green
+
+    # ── Step 5: Try to match SPO → Graph report data ──
     $matchedByUrl = 0
     $matchedById = 0
 
-    Write-Host "Merging $($spoData.Count) SPO sites with Graph usage data..." -ForegroundColor Cyan
+    # Build per-SPO-site match results
+    $spoGraphMatch = @{}  # SPO URL → Graph report row (or $null)
 
     foreach ($spoSite in $spoData) {
         $graphSite = $null
@@ -734,7 +777,54 @@ function Get-UsageReportsCombined {
             }
         }
 
-        # Build combined row: SPO metadata + Graph usage metrics
+        $spoGraphMatch[$spoSite.SiteUrl] = $graphSite
+    }
+
+    $totalMatched = $matchedByUrl + $matchedById
+    Write-Host "Report matching: $matchedByUrl by URL, $matchedById by SiteId, $($spoData.Count - $totalMatched) unmatched." -ForegroundColor Cyan
+
+    # ── Step 6: If report join mostly failed, fall back to per-site analytics ──
+    # When the report is still effectively concealed (zeroed SiteIds, blank URLs),
+    # the join will fail.  In that case, use Graph per-site analytics (which are
+    # NOT subject to report concealment) with the compound site IDs we resolved.
+    $usePerSiteAnalytics = $false
+    $perSiteAnalytics = @{}
+
+    if ($totalMatched -lt ($spoData.Count * 0.2) -and $spoCompoundMap.Count -gt 0) {
+        Write-Warning "Report join mostly failed ($totalMatched of $($spoData.Count) matched). Graph report data appears to be obfuscated."
+        Write-Host "Falling back to per-site analytics via Graph (not subject to report concealment)..." -ForegroundColor Yellow
+
+        # Build a sites array for Get-PerSiteAnalyticsViaGraph from the resolved compound IDs
+        $analyticsInput = @()
+        foreach ($url in $spoCompoundMap.Keys) {
+            $analyticsInput += [PSCustomObject]@{
+                id     = $spoCompoundMap[$url]
+                webUrl = $url
+            }
+        }
+
+        if ($analyticsInput.Count -gt 0) {
+            $perSiteAnalytics = Get-PerSiteAnalyticsViaGraph -Sites $analyticsInput
+            $usePerSiteAnalytics = $true
+            Write-Host "Retrieved per-site analytics for $($perSiteAnalytics.Count) sites." -ForegroundColor Green
+        }
+    }
+
+    # ── Step 7: Build final output ──
+    $combinedData = @()
+
+    Write-Host "Building combined report for $($spoData.Count) SPO sites..." -ForegroundColor Cyan
+
+    foreach ($spoSite in $spoData) {
+        $graphSite = $spoGraphMatch[$spoSite.SiteUrl]
+
+        # If we're using per-site analytics as fallback, get the enrichment data
+        $enrichment = $null
+        if ($usePerSiteAnalytics -and -not $graphSite) {
+            $enrichment = if ($spoSite.SiteUrl) { $perSiteAnalytics[$spoSite.SiteUrl] } else { $null }
+        }
+
+        # Build combined row: SPO metadata + Graph usage metrics (from report or per-site analytics)
         $combined = [PSCustomObject]@{
             SiteUrl                 = $spoSite.SiteUrl
             Title                   = $spoSite.Title
@@ -744,10 +834,16 @@ function Get-UsageReportsCombined {
             StorageQuotaMB          = $spoSite.StorageQuotaMB
             StorageUsedPercentage   = $spoSite.StorageUsedPercentage
             LastContentModifiedDate = $spoSite.LastContentModifiedDate
-            LastActivityDate        = if ($graphSite) { $graphSite.LastActivityDate } else { '' }
-            FileCount               = if ($graphSite) { $graphSite.FileCount } else { '' }
+            LastActivityDate        = if ($graphSite) { $graphSite.LastActivityDate } `
+                                      elseif ($enrichment -and $null -ne $enrichment.LastActivityDate) { $enrichment.LastActivityDate } `
+                                      else { '' }
+            FileCount               = if ($graphSite) { $graphSite.FileCount } `
+                                      elseif ($enrichment -and $null -ne $enrichment.FileCount) { $enrichment.FileCount } `
+                                      else { '' }
             ActiveFileCount         = if ($graphSite) { $graphSite.ActiveFileCount } else { '' }
-            PageViewCount           = if ($graphSite) { $graphSite.PageViewCount } else { '' }
+            PageViewCount           = if ($graphSite) { $graphSite.PageViewCount } `
+                                      elseif ($enrichment -and $null -ne $enrichment.PageViewCount) { $enrichment.PageViewCount } `
+                                      else { '' }
             VisitedPageCount        = if ($graphSite) { $graphSite.VisitedPageCount } else { '' }
             SharingCapability       = $spoSite.SharingCapability
             LockState               = $spoSite.LockState
@@ -762,13 +858,16 @@ function Get-UsageReportsCombined {
         $combinedData += $combined
     }
 
-    $totalMatched = $matchedByUrl + $matchedById
-    Write-Host "Combined report: $($combinedData.Count) sites — $matchedByUrl matched by URL, $matchedById matched by SiteId, $($spoData.Count - $totalMatched) SPO-only (no Graph usage data)." -ForegroundColor Green
+    $analyticsCount = if ($usePerSiteAnalytics) { ($perSiteAnalytics.Values | Where-Object { $null -ne $_.PageViewCount }).Count } else { 0 }
+    Write-Host "Combined report: $($combinedData.Count) sites — $matchedByUrl matched by URL, $matchedById matched by SiteId" -ForegroundColor Green -NoNewline
+    if ($usePerSiteAnalytics) {
+        Write-Host ", $analyticsCount enriched via per-site analytics" -ForegroundColor Green -NoNewline
+    }
+    Write-Host "." -ForegroundColor Green
 
-    if ($totalMatched -eq 0 -and $graphData.Count -gt 0) {
-        Write-Warning "No SPO sites matched Graph usage data. Activity columns will be empty."
-        Write-Warning "This can occur when the M365 report concealment setting is enabled and Graph data is fully obfuscated."
-        Write-Warning "The script resolved $($spoSiteIdMap.Count) SPO URLs to Graph SiteIds but the Graph report's SiteIds may be zeroed out."
+    if ($totalMatched -eq 0 -and -not $usePerSiteAnalytics -and $graphData.Count -gt 0) {
+        Write-Warning "No SPO sites matched Graph usage data and per-site analytics was not available."
+        Write-Warning "Activity columns (PageViewCount, FileCount, etc.) will be empty."
     }
 
     # Disconnect Graph
