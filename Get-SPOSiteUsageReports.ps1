@@ -722,7 +722,7 @@ function Get-UsageReportsCombined {
     $resolveCounter = 0
     $resolveTotal = $spoData.Count
     $failureCount = 0
-    $maxWarnings = 5  # Show first N failures as warnings for diagnostics
+    $maxResolutionWarnings = 5  # Show first N failures as warnings for diagnostics
 
     foreach ($spoSite in $spoData) {
         $resolveCounter++
@@ -739,15 +739,15 @@ function Get-UsageReportsCombined {
         }
         else {
             $failureCount++
-            if ($failureCount -le $maxWarnings) {
+            if ($failureCount -le $maxResolutionWarnings) {
                 Write-Warning "Could not resolve Graph SiteId for: $($spoSite.SiteUrl)"
             }
         }
     }
     Write-Progress -Activity "Resolving SPO URLs to Graph SiteIds" -Completed
 
-    if ($failureCount -gt $maxWarnings) {
-        Write-Warning "... and $($failureCount - $maxWarnings) more sites could not be resolved. Run with -Verbose for details."
+    if ($failureCount -gt $maxResolutionWarnings) {
+        Write-Warning "... and $($failureCount - $maxResolutionWarnings) more sites could not be resolved. Run with -Verbose for details."
     }
     Write-Host "Resolved $($spoSiteIdMap.Count) of $resolveTotal SPO sites to Graph SiteIds ($failureCount failed)." -ForegroundColor Green
 
@@ -789,8 +789,9 @@ function Get-UsageReportsCombined {
     # NOT subject to report concealment) with the compound site IDs we resolved.
     $usePerSiteAnalytics = $false
     $perSiteAnalytics = @{}
+    $matchRateThreshold = 0.2  # Fall back to per-site analytics if less than 20% of sites matched
 
-    if ($totalMatched -lt ($spoData.Count * 0.2) -and $spoCompoundMap.Count -gt 0) {
+    if ($totalMatched -lt ($spoData.Count * $matchRateThreshold) -and $spoCompoundMap.Count -gt 0) {
         Write-Warning "Report join mostly failed ($totalMatched of $($spoData.Count) matched). Graph report data appears to be obfuscated."
         Write-Host "Falling back to per-site analytics via Graph (not subject to report concealment)..." -ForegroundColor Yellow
 
