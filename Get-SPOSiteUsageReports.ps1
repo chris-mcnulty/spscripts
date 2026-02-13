@@ -101,7 +101,7 @@ function Get-UsageReportsViaGraph {
     try {
         # Connect to Microsoft Graph — include ReportSettings.ReadWrite.All so the
         # script can detect and disable the report-privacy concealment setting.
-        Connect-MgGraph -Scopes "Reports.Read.All", "Sites.Read.All", "ReportSettings.ReadWrite.All" -NoWelcome
+        $null = Connect-MgGraph -Scopes "Reports.Read.All", "Sites.Read.All", "ReportSettings.ReadWrite.All" -NoWelcome
         
         # Proactively check the admin concealment setting before pulling the report.
         $privacyResult = Resolve-GraphReportPrivacy
@@ -249,7 +249,7 @@ function Get-UsageReportsViaGraph {
     finally {
         if ($tempFile) { Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue }
         if (-not $KeepConnection) {
-            Disconnect-MgGraph -ErrorAction SilentlyContinue
+            $null = Disconnect-MgGraph -ErrorAction SilentlyContinue
         }
     }
 }
@@ -266,7 +266,7 @@ function Get-UsageReportsViaSPO {
     
     try {
         # Connect to SharePoint Online
-        Connect-SPOService -Url $adminUrl
+        $null = Connect-SPOService -Url $adminUrl
         
         Write-Host "Retrieving all SharePoint sites..." -ForegroundColor Cyan
         
@@ -327,7 +327,7 @@ function Get-UsageReportsViaSPO {
         throw
     }
     finally {
-        Disconnect-SPOService -ErrorAction SilentlyContinue
+        $null = Disconnect-SPOService -ErrorAction SilentlyContinue
     }
 }
 
@@ -518,7 +518,7 @@ function Resolve-GraphReportPrivacy {
             Write-Warning "Report privacy setting 'Conceal user, group, and site names in all reports' is ENABLED in your tenant (DisplayConcealedNames = True)."
             Write-Host "Attempting to disable the concealment setting via Update-MgAdminReportSetting..." -ForegroundColor Yellow
             try {
-                Update-MgAdminReportSetting -DisplayConcealedNames:$false -ErrorAction Stop
+                $null = Update-MgAdminReportSetting -DisplayConcealedNames:$false -ErrorAction Stop
                 Write-Host "Concealment setting has been disabled (DisplayConcealedNames set to False)." -ForegroundColor Green
                 Write-Host "Note: report data may take up to 48 hours to reflect this change." -ForegroundColor Yellow
                 Write-Host "Re-run this script after the propagation period for fully de-obfuscated data." -ForegroundColor Yellow
@@ -727,7 +727,7 @@ function Get-UsageReportsCombined {
     # ── Step 2: Connect to Graph and pull the usage report ──
     Write-Host "Connecting to Microsoft Graph for usage metrics..." -ForegroundColor Cyan
     try {
-        Connect-MgGraph -Scopes "Reports.Read.All", "Sites.Read.All", "ReportSettings.ReadWrite.All" -NoWelcome
+        $null = Connect-MgGraph -Scopes "Reports.Read.All", "Sites.Read.All", "ReportSettings.ReadWrite.All" -NoWelcome
     }
     catch {
         Write-Warning "Could not connect to Microsoft Graph: $_"
@@ -788,7 +788,7 @@ function Get-UsageReportsCombined {
     catch {
         Write-Warning "Could not retrieve Graph usage report: $_"
         Write-Warning "Combined report will contain SPO metadata only."
-        Disconnect-MgGraph -ErrorAction SilentlyContinue
+        $null = Disconnect-MgGraph -ErrorAction SilentlyContinue
         return Build-SPOOnlyOutput -SpoData $spoData
     }
     finally {
@@ -986,7 +986,7 @@ function Get-UsageReportsCombined {
     }
 
     # Disconnect Graph
-    Disconnect-MgGraph -ErrorAction SilentlyContinue
+    $null = Disconnect-MgGraph -ErrorAction SilentlyContinue
 
     return $combinedData
 }
