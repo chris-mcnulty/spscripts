@@ -369,23 +369,27 @@ function Get-GraphReportCsv {
     }
 
     # Approach 2: Use the typed cmdlet with progress suppressed
+    $savedProgress = $ProgressPreference
     try {
-        $savedProgress = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
         Get-MgReportSharePointSiteUsageDetail -Period D7 -OutFile $TempFile -ErrorAction Stop
-        $ProgressPreference = $savedProgress
-
-        $header = Get-Content -Path $TempFile -TotalCount 1 -ErrorAction Stop
-        if ($header -and $header -match 'Site Id') {
-            $VerbosePreference = $savedVerbose
-            return $true
-        }
-        Write-Host "Get-MgReportSharePointSiteUsageDetail also produced invalid content." -ForegroundColor Yellow
     }
     catch {
-        $ProgressPreference = $savedProgress
         Write-Host "Get-MgReportSharePointSiteUsageDetail also failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        $ProgressPreference = $savedProgress
+        $VerbosePreference = $savedVerbose
+        return $false
     }
+    finally {
+        $ProgressPreference = $savedProgress
+    }
+
+    $header = Get-Content -Path $TempFile -TotalCount 1 -ErrorAction SilentlyContinue
+    if ($header -and $header -match 'Site Id') {
+        $VerbosePreference = $savedVerbose
+        return $true
+    }
+    Write-Host "Get-MgReportSharePointSiteUsageDetail also produced invalid content." -ForegroundColor Yellow
 
     $VerbosePreference = $savedVerbose
     return $false
