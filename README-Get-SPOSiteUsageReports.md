@@ -216,15 +216,23 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 - Personal sites are excluded by default; modify the script if needed
 - Some sites may be hidden or require special permissions
 
+### Issue: `-Verbose` Produces Garbled CSV or Excessive Output
+**Solution**: The script now automatically suppresses `-Verbose` propagation to internal Graph API calls. If you still see excessive VERBOSE output:
+- This is expected behavior from the Microsoft Graph PowerShell SDK — each HTTP request generates two VERBOSE lines
+- The script isolates Graph calls so they don't inherit `-Verbose`, but some cmdlets may still produce output
+- If the CSV file appears corrupted (contains module manifest properties instead of report data), the script will automatically detect this and fall back to the typed cmdlet
+
 ### Issue: Graph API Returns Obfuscated Data (Zeroed SiteIds, Hashed Names)
 **Solution**: The Microsoft 365 admin center has a privacy setting called **"Conceal user, group, and site names in all reports"** that causes the Graph Reports API to return hashed owner names, zeroed-out Site IDs, and empty Site URLs.
 
 The script now handles this automatically:
 1. **Uses SPO as source of truth** — `Get-SPOSite` reliably returns Title, URL, and Owner even when the Graph Reports API is obfuscated
-2. **Bypasses the buggy cmdlet** — uses `Invoke-MgGraphRequest` directly instead of `Get-MgReportSharePointSiteUsageDetail` (which has a PercentComplete overflow bug)
-3. **Resolves SiteIds with visible error logging** — uses `Get-MgSite` path-based addressing and `Invoke-MgGraphRequest` to resolve SPO URLs to Graph compound site IDs; logs first failures as warnings so you can diagnose 403 vs 404 errors
-4. **Falls back to per-site analytics** — when the report join fails (concealed data), automatically falls back to `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` using resolved compound site IDs (not subject to report concealment)
-5. **Checks the admin setting** via `(Get-MgAdminReportSetting).DisplayConcealedNames` and **attempts to disable it** via `Update-MgAdminReportSetting -DisplayConcealedNames:$false`
+2. **Robust report download** — `Get-GraphReportCsv` tries `Invoke-MgGraphRequest -OutputFilePath` first, validates the result is real CSV, and falls back to `Get-MgReportSharePointSiteUsageDetail -OutFile` with progress suppression
+3. **Suppresses `-Verbose` noise** — internal Graph API calls (`Get-MgSite`, `Invoke-MgGraphRequest`) are isolated from the `-Verbose` preference to prevent hundreds of VERBOSE lines and potential file corruption
+4. **Resolves SiteIds with visible error logging** — uses `Get-MgSite` path-based addressing and `Invoke-MgGraphRequest` to resolve SPO URLs to Graph compound site IDs; logs first failures as warnings so you can diagnose 403 vs 404 errors
+5. **Falls back to per-site analytics** — when the report join fails (concealed data), automatically falls back to `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` using resolved compound site IDs (not subject to report concealment)
+6. **Checks the admin setting** via `(Get-MgAdminReportSetting).DisplayConcealedNames` and **attempts to disable it** via `Update-MgAdminReportSetting -DisplayConcealedNames:$false`
+7. **Validates output** — checks that SiteUrl and Title are populated in the final output before export, warns if they are blank
 
 **Important notes:**
 - In combined mode (`-UseCombined`), SPO metadata (Title, URL, Owner) is always available regardless of Graph obfuscation
@@ -277,6 +285,11 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **2.2.0** (2026-02-13): Fix `-Verbose` garbled CSV and improve report download robustness
+  - Added `Get-GraphReportCsv` helper that downloads the usage report with validation: tries `Invoke-MgGraphRequest -OutputFilePath` first, validates CSV headers, falls back to `Get-MgReportSharePointSiteUsageDetail -OutFile` with progress suppression
+  - Suppressed `-Verbose` propagation to all internal Graph API calls (`Get-MgSite`, `Invoke-MgGraphRequest`) — prevents hundreds of noisy VERBOSE lines and file corruption during resolution loops
+  - Added diagnostic validation: SPO data sample at load time, URL/Title presence check before export
+  - CSV header validation catches garbled report downloads (Graph manifest properties) before parsing
 - **2.1.0** (2026-02-13): Fix reports cmdlet crash, add per-site analytics fallback, improve error visibility
   - Replaced `Get-MgReportSharePointSiteUsageDetail` with `Invoke-MgGraphRequest` to fix PercentComplete overflow crash
   - Added `Resolve-GraphSiteId` helper with dual approach (Get-MgSite + Invoke-MgGraphRequest) and visible error logging

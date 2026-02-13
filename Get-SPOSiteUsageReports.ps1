@@ -111,14 +111,14 @@ function Get-UsageReportsViaGraph {
         # Get SharePoint site usage details for the last 7 days
         $usageData = @()
         
-        # Get site usage detail report — call the Graph REST endpoint directly
-        # instead of the Get-MgReportSharePointSiteUsageDetail cmdlet, which has
-        # a known PercentComplete overflow bug (int32 overflow in Write-Progress).
-        # Invoke-MgGraphRequest -OutputFilePath bypasses the cmdlet wrapper entirely.
+        # Get site usage detail report via the robust download helper, which
+        # tries Invoke-MgGraphRequest first (avoids PercentComplete overflow)
+        # and falls back to the typed cmdlet with progress suppressed.
         $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".csv")
-        Invoke-MgGraphRequest -Method GET `
-            -Uri "/v1.0/reports/getSharePointSiteUsageDetail(period='D7')" `
-            -OutputFilePath $tempFile
+        $downloadOk = Get-GraphReportCsv -TempFile $tempFile
+        if (-not $downloadOk) {
+            throw "Could not download SharePoint site usage report from Graph. Both download methods failed."
+        }
         
         # Parse the CSV data returned by Graph API
         $sites = Import-Csv -Path $tempFile
@@ -161,6 +161,10 @@ function Get-UsageReportsViaGraph {
             $resolvedCount = 0
             $hostname = "$TenantName.sharepoint.com"
 
+            # Suppress verbose output from Graph API calls
+            $savedVerbose = $VerbosePreference
+            $VerbosePreference = 'SilentlyContinue'
+
             foreach ($blankSite in $blankUrlSites) {
                 try {
                     # The Graph report returns simple GUIDs as SiteIds, but Get-MgSite
@@ -186,6 +190,7 @@ function Get-UsageReportsViaGraph {
                 }
             }
 
+            $VerbosePreference = $savedVerbose
             Write-Host "Resolved $resolvedCount of $($blankUrlSites.Count) blank-URL sites via Get-MgSite." -ForegroundColor Green
         }
 
@@ -326,6 +331,66 @@ function Get-UsageReportsViaSPO {
     }
 }
 
+# Robustly download the SharePoint Site Usage Detail CSV report from Graph.
+# Tries Invoke-MgGraphRequest -OutputFilePath first (avoids the cmdlet's
+# PercentComplete overflow bug), validates the result is real CSV, and falls
+# back to Get-MgReportSharePointSiteUsageDetail -OutFile (with progress
+# suppressed) if the first approach produces garbage.
+#
+# The function suppresses the VerbosePreference for internal Graph calls
+# because -Verbose propagation causes Invoke-MgGraphRequest to log every
+# HTTP request/response as verbose output, and in some SDK versions this
+# interferes with -OutputFilePath, producing a file containing module
+# manifest properties instead of the report CSV.
+function Get-GraphReportCsv {
+    param(
+        [Parameter(Mandatory)][string]$TempFile
+    )
+
+    $savedVerbose = $VerbosePreference
+    $VerbosePreference = 'SilentlyContinue'
+
+    # Approach 1: Invoke-MgGraphRequest -OutputFilePath (avoids Write-Progress bug)
+    try {
+        Invoke-MgGraphRequest -Method GET `
+            -Uri "/v1.0/reports/getSharePointSiteUsageDetail(period='D7')" `
+            -OutputFilePath $TempFile -ErrorAction Stop
+
+        # Validate the file is real CSV with expected report columns
+        $header = Get-Content -Path $TempFile -TotalCount 1 -ErrorAction Stop
+        if ($header -and $header -match 'Site Id') {
+            $VerbosePreference = $savedVerbose
+            return $true
+        }
+        Write-Host "Invoke-MgGraphRequest produced unexpected file content (not a valid report CSV). Trying fallback..." -ForegroundColor Yellow
+    }
+    catch {
+        Write-Host "Invoke-MgGraphRequest for reports failed: $($_.Exception.Message). Trying fallback..." -ForegroundColor Yellow
+    }
+
+    # Approach 2: Use the typed cmdlet with progress suppressed
+    try {
+        $savedProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        Get-MgReportSharePointSiteUsageDetail -Period D7 -OutFile $TempFile -ErrorAction Stop
+        $ProgressPreference = $savedProgress
+
+        $header = Get-Content -Path $TempFile -TotalCount 1 -ErrorAction Stop
+        if ($header -and $header -match 'Site Id') {
+            $VerbosePreference = $savedVerbose
+            return $true
+        }
+        Write-Host "Get-MgReportSharePointSiteUsageDetail also produced invalid content." -ForegroundColor Yellow
+    }
+    catch {
+        $ProgressPreference = $savedProgress
+        Write-Host "Get-MgReportSharePointSiteUsageDetail also failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    $VerbosePreference = $savedVerbose
+    return $false
+}
+
 # Helper to normalize a URL so SPO and Graph values match reliably.
 # Decodes percent-encoded characters, strips trailing slashes, query strings,
 # and fragments, and lowercases the result.
@@ -357,6 +422,12 @@ function Resolve-GraphSiteId {
     $hostname = $u.Host
     $path = $u.AbsolutePath.TrimEnd('/')
 
+    # Suppress verbose output from Graph API calls — when the user runs with
+    # -Verbose these calls produce a line per HTTP request/response, which
+    # generates hundreds of noisy VERBOSE lines during the resolution loop.
+    $savedVerbose = $VerbosePreference
+    $VerbosePreference = 'SilentlyContinue'
+
     # Approach 1: Get-MgSite with path-based addressing
     try {
         $pathBasedId = if ($path -and $path -ne '/') {
@@ -368,6 +439,7 @@ function Resolve-GraphSiteId {
         if ($mgSite -and $mgSite.Id) {
             $parts = $mgSite.Id -split ','
             if ($parts.Count -ge 2) {
+                $VerbosePreference = $savedVerbose
                 return [PSCustomObject]@{
                     CompoundId = $mgSite.Id
                     SiteGuid   = $parts[1]
@@ -390,6 +462,7 @@ function Resolve-GraphSiteId {
         if ($resp.id) {
             $parts = $resp.id -split ','
             if ($parts.Count -ge 2) {
+                $VerbosePreference = $savedVerbose
                 return [PSCustomObject]@{
                     CompoundId = $resp.id
                     SiteGuid   = $parts[1]
@@ -401,6 +474,7 @@ function Resolve-GraphSiteId {
         # Both approaches failed
     }
 
+    $VerbosePreference = $savedVerbose
     return $null
 }
 
@@ -478,6 +552,11 @@ function Get-PerSiteAnalyticsViaGraph {
 
     Write-Host "Retrieving per-site analytics for $total sites (this may take a moment)..." -ForegroundColor Cyan
 
+    # Suppress verbose output from Graph API calls to avoid hundreds of
+    # VERBOSE lines when the user runs with -Verbose.
+    $savedVerbose = $VerbosePreference
+    $VerbosePreference = 'SilentlyContinue'
+
     foreach ($site in $Sites) {
         $counter++
         $siteId  = $site.id
@@ -544,6 +623,7 @@ function Get-PerSiteAnalyticsViaGraph {
     }
 
     Write-Progress -Activity "Retrieving per-site analytics" -Completed
+    $VerbosePreference = $savedVerbose
     $populated = ($analytics.Values | Where-Object { $null -ne $_.PageViewCount }).Count
     Write-Host "Retrieved analytics for $populated of $total sites." -ForegroundColor Green
 
@@ -560,6 +640,10 @@ function Get-SiteMetadataViaGraph {
 
     $allSites = @()
 
+    # Suppress verbose output from Graph API calls
+    $savedVerbose = $VerbosePreference
+    $VerbosePreference = 'SilentlyContinue'
+
     # Try getAllSites first (works with Sites.Read.All application permission)
     $uri = '/v1.0/sites/getAllSites?$select=id,displayName,webUrl,createdDateTime&$top=999'
     try {
@@ -569,6 +653,7 @@ function Get-SiteMetadataViaGraph {
             $uri = $response.'@odata.nextLink'
         }
         Write-Host "Retrieved metadata for $($allSites.Count) sites from Sites API." -ForegroundColor Green
+        $VerbosePreference = $savedVerbose
         return $allSites
     }
     catch {
@@ -587,10 +672,12 @@ function Get-SiteMetadataViaGraph {
             $uri = $response.'@odata.nextLink'
         }
         Write-Host "Retrieved metadata for $($allSites.Count) sites from Sites API (search)." -ForegroundColor Green
+        $VerbosePreference = $savedVerbose
         return $allSites
     }
     catch {
         Write-Warning "Sites search API also failed: $_"
+        $VerbosePreference = $savedVerbose
         return @()
     }
 }
@@ -623,6 +710,16 @@ function Get-UsageReportsCombined {
     $spoData = Get-UsageReportsViaSPO -TenantName $TenantName
     Write-Host "SPO returned $($spoData.Count) site records (Title, URL, Owner)." -ForegroundColor Cyan
 
+    # Validate that SPO data has expected properties
+    if ($spoData.Count -gt 0) {
+        $sampleSpo = $spoData[0]
+        Write-Verbose "SPO sample — SiteUrl: '$($sampleSpo.SiteUrl)', Title: '$($sampleSpo.Title)', Owner: '$($sampleSpo.Owner)'"
+        $spoWithUrls = ($spoData | Where-Object { -not [string]::IsNullOrWhiteSpace($_.SiteUrl) }).Count
+        if ($spoWithUrls -lt $spoData.Count) {
+            Write-Warning "$($spoData.Count - $spoWithUrls) SPO sites have blank URLs."
+        }
+    }
+
     # ── Step 2: Connect to Graph and pull the usage report ──
     Write-Host "Connecting to Microsoft Graph for usage metrics..." -ForegroundColor Cyan
     try {
@@ -649,15 +746,18 @@ function Get-UsageReportsCombined {
     # Proactively check/fix the report-privacy concealment setting
     $privacyResult = Resolve-GraphReportPrivacy
 
-    # Pull the usage report — use Invoke-MgGraphRequest directly to avoid the
-    # PercentComplete overflow bug in Get-MgReportSharePointSiteUsageDetail.
+    # Pull the usage report via the robust download helper, which tries
+    # Invoke-MgGraphRequest first (avoids the PercentComplete overflow bug)
+    # and falls back to Get-MgReportSharePointSiteUsageDetail with progress
+    # suppression.  Both approaches validate that the output is real CSV.
     Write-Host "Retrieving SharePoint site usage report from Microsoft Graph..." -ForegroundColor Cyan
     $graphData = @()
     $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".csv")
     try {
-        Invoke-MgGraphRequest -Method GET `
-            -Uri "/v1.0/reports/getSharePointSiteUsageDetail(period='D7')" `
-            -OutputFilePath $tempFile
+        $downloadOk = Get-GraphReportCsv -TempFile $tempFile
+        if (-not $downloadOk) {
+            throw "Both report download methods failed or produced invalid content."
+        }
 
         $sites = Import-Csv -Path $tempFile
         foreach ($site in $sites) {
@@ -869,6 +969,16 @@ function Get-UsageReportsCombined {
     if ($totalMatched -eq 0 -and -not $usePerSiteAnalytics -and $graphData.Count -gt 0) {
         Write-Warning "No SPO sites matched Graph usage data and per-site analytics was not available."
         Write-Warning "Activity columns (PageViewCount, FileCount, etc.) will be empty."
+    }
+
+    # Validate final output has expected data
+    if ($combinedData.Count -gt 0) {
+        $withUrls = ($combinedData | Where-Object { -not [string]::IsNullOrWhiteSpace($_.SiteUrl) }).Count
+        $withTitles = ($combinedData | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Title) }).Count
+        Write-Host "Output validation: $withUrls/$($combinedData.Count) have URLs, $withTitles/$($combinedData.Count) have Titles." -ForegroundColor Cyan
+        if ($withUrls -eq 0) {
+            Write-Warning "All SiteUrl values are blank. This indicates SPO data was not properly loaded or is missing URLs."
+        }
     }
 
     # Disconnect Graph
