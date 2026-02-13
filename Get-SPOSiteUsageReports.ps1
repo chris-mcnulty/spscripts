@@ -657,10 +657,13 @@ function Get-UsageReportsCombined {
     $graphUrlCount = $graphUrlLookup.Count
     Write-Host "Graph lookup: $graphUrlCount by URL, $($graphIdLookup.Count) by SiteId." -ForegroundColor Cyan
 
-    # ── Step 4: For each SPO site, resolve its Graph SiteId via path-based
-    #    addressing.  This is the key trick: /sites/{hostname}:/{path}: returns
-    #    the compound site ID without needing getAllSites or app-only permissions.
-    Write-Host "Resolving SPO URLs to Graph SiteIds via path-based addressing..." -ForegroundColor Cyan
+    # ── Step 4: For each SPO site, resolve its Graph SiteId via Get-MgSite
+    #    with path-based addressing.  This is the recommended approach:
+    #      Get-MgSite -SiteId "contoso.sharepoint.com:/sites/SiteName:"
+    #    returns Id, WebUrl, DisplayName — no need for getAllSites or app-only
+    #    permissions.  We extract the site GUID from the compound Id and use it
+    #    to match against the Graph report's "Site Id" field.
+    Write-Host "Resolving SPO URLs to Graph SiteIds via Get-MgSite path-based addressing..." -ForegroundColor Cyan
     $spoSiteIdMap = @{}   # SPO URL → simple site GUID from Graph
     $resolveCounter = 0
     $resolveTotal = $spoData.Count
@@ -677,23 +680,27 @@ function Get-UsageReportsCombined {
             $spoUrl = [System.Uri]$spoSite.SiteUrl
             $hostname = $spoUrl.Host
             $path = $spoUrl.AbsolutePath.TrimEnd('/')
-            # Path-based site addressing: /sites/{hostname}:/{path}:
-            $graphUri = if ($path -and $path -ne '/') {
-                "/v1.0/sites/${hostname}:${path}:?`$select=id"
+
+            # Build the path-based site identifier:
+            #   "contoso.sharepoint.com:/sites/SiteName:"
+            # For root sites (no path), just use the hostname.
+            $pathBasedId = if ($path -and $path -ne '/') {
+                "${hostname}:${path}:"
             } else {
-                "/v1.0/sites/${hostname}?`$select=id"
+                $hostname
             }
-            $resp = Invoke-MgGraphRequest -Method GET -Uri $graphUri -ErrorAction Stop
-            if ($resp.id) {
-                # Compound ID = "hostname,siteGuid,webGuid" — extract siteGuid
-                $parts = $resp.id -split ','
+
+            $mgSite = Get-MgSite -SiteId $pathBasedId -Property "id" -ErrorAction Stop
+            if ($mgSite -and $mgSite.Id) {
+                # Compound Id = "hostname,siteGuid,webGuid" — extract siteGuid
+                $parts = $mgSite.Id -split ','
                 if ($parts.Count -ge 2) {
                     $spoSiteIdMap[$spoSite.SiteUrl] = $parts[1]
                 }
             }
         }
         catch {
-            # Could not resolve — skip silently
+            # Could not resolve this site — skip silently
         }
     }
     Write-Progress -Activity "Resolving SPO URLs to Graph SiteIds" -Completed

@@ -64,7 +64,7 @@ This method provides additional metrics like page views and active file counts.
 ```powershell
 .\Get-SPOSiteUsageReports.ps1 -TenantName "contoso" -UseCombined
 ```
-This mode starts from the Graph API report (which has SiteIds and usage metrics for every site), then enriches each row with friendly metadata (Title, Owner, Template, etc.) from SPO. Sites are matched by URL first; when Graph URLs are blank, SPO URLs are resolved to SiteIds for matching. This approach ensures one row per site with no duplicates.
+This mode uses SPO as the source of truth for site inventory (Title, URL, Owner — never obfuscated), then attaches Graph usage metrics (page views, file counts, activity dates). SPO URLs are resolved to Graph SiteIds using path-based addressing (`Get-MgSite -SiteId "contoso.sharepoint.com:/sites/SiteName:"`), which avoids `getAllSites` and works with delegated permissions.
 
 ### Specify Output Path
 ```powershell
@@ -138,30 +138,28 @@ The CSV file includes:
 - **ReportPeriod**: Report period (e.g., last 7 days)
 
 ### Combined Mode
-The combined mode starts from the Graph API report (authoritative list of all sites with usage metrics) and enriches each row with friendly site metadata from SPO. The CSV file includes:
-- **SiteUrl**: Full URL of the site (from SPO when matched, otherwise from Graph)
-- **SiteId**: Graph Site ID (from Graph)
-- **Title**: Site title (from SPO when matched)
-- **Owner**: Site owner email/username (from SPO when matched, Graph OwnerDisplayName otherwise)
-- **OwnerPrincipalName**: Owner UPN (from Graph)
-- **Template**: Site template type (from SPO when matched)
-- **StorageUsedMB**: Current storage usage in megabytes (from SPO when matched, Graph otherwise)
-- **StorageQuotaMB**: Storage quota in megabytes (from SPO when matched, Graph otherwise)
-- **StorageUsedPercentage**: Percentage of storage quota used (from SPO when matched)
-- **LastContentModifiedDate**: Date of last content modification (from SPO when matched)
+The combined mode uses SPO as the source of truth for site inventory and enriches each site with Graph usage metrics. The CSV file includes:
+- **SiteUrl**: Full URL of the site (from SPO — always reliable)
+- **Title**: Site title (from SPO)
+- **Owner**: Site owner email/username (from SPO)
+- **Template**: Site template type (from SPO)
+- **StorageUsedMB**: Current storage usage in megabytes (from SPO)
+- **StorageQuotaMB**: Storage quota in megabytes (from SPO)
+- **StorageUsedPercentage**: Percentage of storage quota used (from SPO)
+- **LastContentModifiedDate**: Date of last content modification (from SPO)
 - **LastActivityDate**: Date of last activity (from Graph)
 - **FileCount**: Total number of files (from Graph)
 - **ActiveFileCount**: Number of active files (from Graph)
 - **PageViewCount**: Number of page views in last 7 days (from Graph)
 - **VisitedPageCount**: Number of distinct pages visited in last 7 days (from Graph)
-- **SharingCapability**: External sharing settings (from SPO when matched)
-- **LockState**: Site lock status (from SPO when matched)
-- **IsHubSite**: Whether the site is a hub site (from SPO when matched)
-- **HubSiteId**: Hub site ID if connected to a hub (from SPO when matched)
-- **SensitivityLabel**: Applied sensitivity label (from SPO when matched)
+- **SharingCapability**: External sharing settings (from SPO)
+- **LockState**: Site lock status (from SPO)
+- **IsHubSite**: Whether the site is a hub site (from SPO)
+- **HubSiteId**: Hub site ID if connected to a hub (from SPO)
+- **SensitivityLabel**: Applied sensitivity label (from SPO)
 - **RootWebTemplate**: Site template (from Graph)
 - **IsDeleted**: Whether the site has been deleted (from Graph)
-- **CreatedDate**: Site creation date (from SPO when matched)
+- **CreatedDate**: Site creation date (from SPO)
 - **ReportRefreshDate**: When the Graph report was generated
 
 ## Examples
@@ -222,16 +220,15 @@ Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -
 **Solution**: The Microsoft 365 admin center has a privacy setting called **"Conceal user, group, and site names in all reports"** that causes the Graph Reports API to return hashed owner names, zeroed-out Site IDs, and empty Site URLs.
 
 The script now handles this automatically:
-1. **Detects obfuscated data** by checking for zeroed SiteIds, empty URLs, and hashed owner names
-2. **Checks the admin setting** via `(Get-MgAdminReportSetting).DisplayConcealedNames` and **attempts to disable it** via `Update-MgAdminReportSetting -DisplayConcealedNames:$false` (requires `ReportSettings.ReadWrite.All` permission)
-3. **Resolves blank URLs via Get-MgSite** — for any site with a valid SiteId but blank URL, calls `Get-MgSite -SiteId` to retrieve the real `displayName` and `webUrl` (not affected by report concealment)
-4. **Falls back to the Microsoft Graph Sites API** (`/sites/getAllSites`) which is not affected by the report-privacy setting, providing real site URLs, IDs, and display names
-5. **Retrieves per-site analytics** via `/sites/{id}/analytics/lastSevenDays` and `/sites/{id}/drive` to populate page views, file counts, storage, and last activity dates — these endpoints are **not subject to the concealment setting**
+1. **Uses SPO as source of truth** — `Get-SPOSite` reliably returns Title, URL, and Owner even when the Graph Reports API is obfuscated
+2. **Resolves SiteIds via path-based addressing** — `Get-MgSite -SiteId "hostname:/sites/Name:"` returns the Graph compound site ID from any SPO URL, without needing `getAllSites` or app-only permissions
+3. **Checks the admin setting** via `(Get-MgAdminReportSetting).DisplayConcealedNames` and **attempts to disable it** via `Update-MgAdminReportSetting -DisplayConcealedNames:$false` (requires `ReportSettings.ReadWrite.All` permission)
+4. **Graph-only mode fallback**: resolves blank URLs via `Get-MgSite` compound IDs, and falls back to the Sites API for fully obfuscated data
 
 **Important notes:**
+- In combined mode (`-UseCombined`), SPO metadata (Title, URL, Owner) is always available regardless of Graph obfuscation
+- Graph usage columns (PageViewCount, FileCount, etc.) may be empty if the Graph report SiteIds are zeroed out
 - After disabling the concealment setting, report data can take **up to 48 hours** to reflect the change
-- `ActiveFileCount` and `VisitedPageCount` are only available from the Reports API and will be empty while the data is still obfuscated
-- Most key metrics (PageViewCount, FileCount, LastActivityDate, StorageUsedInBytes) are retrieved via per-site analytics even when the report is obfuscated
 - Grant `ReportSettings.ReadWrite.All` permission for automatic setting correction
 
 ## Permissions Required
@@ -277,6 +274,13 @@ This script is provided as-is without warranty. Use at your own risk.
 
 ## Version History
 
+- **2.0.0** (2026-02-13): SPO-first combined mode with `Get-MgSite` path-based addressing
+  - Combined mode now uses SPO as source of truth for site inventory (Title, URL, Owner — never obfuscated)
+  - Resolves SPO URLs to Graph SiteIds via `Get-MgSite -SiteId "hostname:/sites/Name:"` — avoids `getAllSites` entirely
+  - Matches SPO sites to Graph usage report by URL first, then by resolved SiteId
+  - Graph connection managed independently from SPO (no session lifecycle issues)
+  - Graceful degradation: returns SPO-only data if Graph connection fails
+  - Validates Graph permissions at start of combined mode
 - **1.4.2** (2026-02-12): Fix three bugs preventing Graph-to-SPO matching
   - Fixed `Get-MgSite` to use compound SiteId format (`hostname,siteGuid,siteGuid`) instead of simple GUIDs
   - Fixed Graph session being disconnected before combined mode could use it (`-KeepConnection` switch)
